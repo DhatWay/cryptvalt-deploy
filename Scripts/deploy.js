@@ -39,99 +39,78 @@ async function main() {
     process.exit(1);
   }
 
-  const addresses = {};
+  // ── Resume support: load any already-deployed addresses ──
+  // so a rerun (e.g. after running out of gas) never wastes gas
+  // redeploying contracts that already succeeded.
+  const SAVE_FILE = 'deployed-addresses.json';
+  let addresses = {};
+  if (fs.existsSync(SAVE_FILE)) {
+    try {
+      const prev = JSON.parse(fs.readFileSync(SAVE_FILE, 'utf8'));
+      if (prev.network === network.name && prev.addresses) {
+        addresses = prev.addresses;
+        console.log(`Resuming — found ${Object.keys(addresses).length} already-deployed contract(s) on ${network.name}.\n`);
+      }
+    } catch(e) { /* ignore unreadable/old file, start fresh */ }
+  }
+
+  async function deployIfNeeded(step, key, label, factoryName, args) {
+    if (addresses[key]) {
+      console.log(`${step}/8 ${label} already deployed — skipping. (${addresses[key]})\n`);
+      return;
+    }
+    console.log(`${step}/8 Deploying ${label}...`);
+    const Factory = await ethers.getContractFactory(factoryName);
+    const instance = await Factory.deploy(...args);
+    await instance.waitForDeployment();
+    addresses[key] = await instance.getAddress();
+    console.log(`    ✓ ${label}: ${addresses[key]}\n`);
+    fs.writeFileSync(SAVE_FILE, JSON.stringify({ network: network.name, deployedAt: new Date().toISOString(), deployer: deployer.address, addresses }, null, 2));
+  }
 
   // ══════════════════════════════════════════════════════
   // 1. CryptValtToken — CVT ERC-20
-  //    constructor(address _treasury)
   // ══════════════════════════════════════════════════════
-  console.log('1/8 Deploying CryptValtToken...');
-  const Token = await ethers.getContractFactory('CryptValtToken');
-  const token = await Token.deploy(OWNER_WALLET);
-  await token.waitForDeployment();
-  addresses.CRYPTVALT_TOKEN = await token.getAddress();
-  console.log(`    ✓ CryptValtToken: ${addresses.CRYPTVALT_TOKEN}\n`);
+  await deployIfNeeded(1, 'CRYPTVALT_TOKEN', 'CryptValtToken', 'CryptValtToken', [OWNER_WALLET]);
 
   // ══════════════════════════════════════════════════════
   // 2. CryptValtGovernor — Reputation system
-  //    constructor(address _platform)
   // ══════════════════════════════════════════════════════
-  console.log('2/8 Deploying CryptValtGovernor...');
-  const Governor = await ethers.getContractFactory('CryptValtGovernor');
-  const governor = await Governor.deploy(OWNER_WALLET);
-  await governor.waitForDeployment();
-  addresses.CRYPTVALT_GOVERNOR = await governor.getAddress();
-  console.log(`    ✓ CryptValtGovernor: ${addresses.CRYPTVALT_GOVERNOR}\n`);
+  await deployIfNeeded(2, 'CRYPTVALT_GOVERNOR', 'CryptValtGovernor', 'CryptValtGovernor', [OWNER_WALLET]);
 
   // ══════════════════════════════════════════════════════
   // 3. CryptValtValuation — Pricing algorithm
-  //    constructor(address _platform)
   // ══════════════════════════════════════════════════════
-  console.log('3/8 Deploying CryptValtValuation...');
-  const Valuation = await ethers.getContractFactory('CryptValtValuation');
-  const valuation = await Valuation.deploy(OWNER_WALLET);
-  await valuation.waitForDeployment();
-  addresses.CRYPTVALT_VALUATION = await valuation.getAddress();
-  console.log(`    ✓ CryptValtValuation: ${addresses.CRYPTVALT_VALUATION}\n`);
+  await deployIfNeeded(3, 'CRYPTVALT_VALUATION', 'CryptValtValuation', 'CryptValtValuation', [OWNER_WALLET]);
 
   // ══════════════════════════════════════════════════════
   // 4. CryptValtMembership — NFT membership tiers
-  //    constructor(address _treasury)
   // ══════════════════════════════════════════════════════
-  console.log('4/8 Deploying CryptValtMembership...');
-  const Membership = await ethers.getContractFactory('CryptValtMembership');
-  const membership = await Membership.deploy(OWNER_WALLET);
-  await membership.waitForDeployment();
-  addresses.CRYPTVALT_MEMBERSHIP = await membership.getAddress();
-  console.log(`    ✓ CryptValtMembership: ${addresses.CRYPTVALT_MEMBERSHIP}\n`);
+  await deployIfNeeded(4, 'CRYPTVALT_MEMBERSHIP', 'CryptValtMembership', 'CryptValtMembership', [OWNER_WALLET]);
 
   // ══════════════════════════════════════════════════════
   // 5. CryptValtFounder — Genesis Founder NFTs
-  //    constructor(address _treasury)
   // ══════════════════════════════════════════════════════
-  console.log('5/8 Deploying CryptValtFounder...');
-  const Founder = await ethers.getContractFactory('CryptValtFounder');
-  const founder = await Founder.deploy(OWNER_WALLET);
-  await founder.waitForDeployment();
-  addresses.CRYPTVALT_FOUNDER = await founder.getAddress();
-  console.log(`    ✓ CryptValtFounder: ${addresses.CRYPTVALT_FOUNDER}\n`);
+  await deployIfNeeded(5, 'CRYPTVALT_FOUNDER', 'CryptValtFounder', 'CryptValtFounder', [OWNER_WALLET]);
 
   // ══════════════════════════════════════════════════════
   // 6. CryptValt — Core protocol (main contract)
-  //    constructor(address _wallet, uint256 _fee)
   // ══════════════════════════════════════════════════════
-  console.log('6/8 Deploying CryptValt (core)...');
-  const CryptValt = await ethers.getContractFactory('CryptValt');
-  const cryptvalt = await CryptValt.deploy(OWNER_WALLET, PLATFORM_FEE);
-  await cryptvalt.waitForDeployment();
-  addresses.CRYPTVALT = await cryptvalt.getAddress();
-  console.log(`    ✓ CryptValt: ${addresses.CRYPTVALT}\n`);
+  await deployIfNeeded(6, 'CRYPTVALT', 'CryptValt (core)', 'CryptValt', [OWNER_WALLET, PLATFORM_FEE]);
 
   // ══════════════════════════════════════════════════════
   // 7. CryptValtRevenue — Revenue distribution
-  //    constructor(address _treasury)
   // ══════════════════════════════════════════════════════
-  console.log('7/8 Deploying CryptValtRevenue...');
-  const Revenue = await ethers.getContractFactory('CryptValtRevenue');
-  const revenue = await Revenue.deploy(OWNER_WALLET);
-  await revenue.waitForDeployment();
-  addresses.CRYPTVALT_REVENUE = await revenue.getAddress();
-  console.log(`    ✓ CryptValtRevenue: ${addresses.CRYPTVALT_REVENUE}\n`);
+  await deployIfNeeded(7, 'CRYPTVALT_REVENUE', 'CryptValtRevenue', 'CryptValtRevenue', [OWNER_WALLET]);
 
   // ══════════════════════════════════════════════════════
   // 8. CryptValtDAO — DAO governance
-  //    constructor(address _cvt, address _founder, address _treasury)
   // ══════════════════════════════════════════════════════
-  console.log('8/8 Deploying CryptValtDAO...');
-  const DAO = await ethers.getContractFactory('CryptValtDAO');
-  const dao = await DAO.deploy(
-    addresses.CRYPTVALT_TOKEN,    // CVT token address
-    addresses.CRYPTVALT_FOUNDER,  // Founder NFT address
-    OWNER_WALLET                  // Treasury
-  );
-  await dao.waitForDeployment();
-  addresses.CRYPTVALT_DAO = await dao.getAddress();
-  console.log(`    ✓ CryptValtDAO: ${addresses.CRYPTVALT_DAO}\n`);
+  await deployIfNeeded(8, 'CRYPTVALT_DAO', 'CryptValtDAO', 'CryptValtDAO', [
+    addresses.CRYPTVALT_TOKEN,
+    addresses.CRYPTVALT_FOUNDER,
+    OWNER_WALLET,
+  ]);
 
   // ══════════════════════════════════════════════════════
   // SAVE ADDRESSES
