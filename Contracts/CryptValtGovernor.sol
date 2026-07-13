@@ -36,18 +36,19 @@ contract CryptValtGovernor {
     event AutoFrozen(address indexed wallet, string reason);
     event WalletVerified(address indexed wallet);
     event ParamUpdated(string param, uint256 value);
-    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
+    event PlatformUpdated(address indexed newPlatform);
+    event ActiveToggled(bool indexed newState);
 
-    modifier onlyOwner()    { require(msg.sender == owner,                          "Not owner");    _; }
-    modifier onlyPlatform() { require(msg.sender == platform || msg.sender == owner,"Not platform"); _; }
-    modifier isActive()     { require(active,                                       "Inactive");     _; }
+    modifier onlyOwner()    { require(msg.sender == owner, "Not owner");    _; }
+    modifier onlyPlatform() { require(msg.sender == platform || msg.sender == owner, "Not platform"); _; }
+    modifier isActive()     { require(active, "Inactive"); _; }
 
     constructor(address _platform) {
+        require(_platform != address(0), "Zero platform");
         owner    = msg.sender;
         platform = _platform;
     }
 
-    // ── Profile ────────────────────────────────────────────
     function _init(address w) internal {
         if (firstSeen[w] == 0) {
             reputation[w] = INITIAL_REP;
@@ -77,7 +78,6 @@ contract CryptValtGovernor {
         emit AutoFrozen(w, reason);
     }
 
-    // ── Platform Callbacks ─────────────────────────────────
     function onListingCreated(uint256, address inventor) external onlyPlatform isActive {
         _init(inventor);
         totalListings[inventor]++;
@@ -117,7 +117,6 @@ contract CryptValtGovernor {
         }
     }
 
-    // ── Velocity Check ─────────────────────────────────────
     function _checkVelocity(address bidder, uint256 listingId) internal {
         if (block.timestamp - bidWindowStart[bidder] > 1 hours) {
             bidWindowStart[bidder] = block.timestamp;
@@ -132,7 +131,6 @@ contract CryptValtGovernor {
         }
     }
 
-    // ── Platform Interface ─────────────────────────────────
     function canBid(address wallet) external view returns (bool, string memory) {
         if (!active)          return (true,  "");
         if (frozen[wallet])   return (false, "Wallet frozen");
@@ -149,7 +147,6 @@ contract CryptValtGovernor {
         return (true, "");
     }
 
-    // ── View ───────────────────────────────────────────────
     function getReputation(address wallet) external view returns (uint256) {
         return firstSeen[wallet] == 0 ? INITIAL_REP : reputation[wallet];
     }
@@ -168,8 +165,8 @@ contract CryptValtGovernor {
         return (totalFlags, totalFreezes, active);
     }
 
-    // ── Admin ──────────────────────────────────────────────
     function verifyWallet(address wallet) external onlyOwner {
+        require(wallet != address(0), "Zero address");
         _init(wallet);
         verified[wallet] = true;
         _addRep(wallet, 150);
@@ -177,11 +174,13 @@ contract CryptValtGovernor {
     }
 
     function manualFreeze(address wallet) external onlyOwner {
+        require(wallet != address(0), "Zero address");
         _init(wallet);
         _freeze(wallet, "Manual freeze by admin");
     }
 
     function manualUnfreeze(address wallet) external onlyOwner {
+        require(wallet != address(0), "Zero address");
         frozen[wallet] = false;
     }
 
@@ -200,12 +199,14 @@ contract CryptValtGovernor {
         emit ParamUpdated("maxBidsPerHr", val);
     }
 
-    function setActive(bool val) external onlyOwner { active = val; }
-    function updatePlatform(address p) external onlyOwner { platform = p; }
+    function setActive(bool val) external onlyOwner {
+        active = val;
+        emit ActiveToggled(val);
+    }
 
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Zero address");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
+    function updatePlatform(address p) external onlyOwner {
+        require(p != address(0), "Zero address");
+        platform = p;
+        emit PlatformUpdated(p);
     }
 }

@@ -1,50 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-/**
- * CryptValt Token (CVT)
- * ERC-20 Platform Token
- *
- * Tokenomics:
- * Total Supply: 100,000,000 CVT (100M)
- *
- * Distribution:
- * - 40% Community & Platform Rewards  — 40,000,000 CVT
- * - 20% Team & Advisors (2yr vesting) — 20,000,000 CVT
- * - 15% Treasury                      — 15,000,000 CVT
- * - 15% Ecosystem & Partnerships      — 15,000,000 CVT
- * - 10% Initial Liquidity             — 10,000,000 CVT
- *
- * Utility:
- * - Pay platform fees at 50% discount
- * - Stake to earn platform revenue share
- * - Governance voting power
- * - Boost scout referral multiplier
- * - Unlock premium features
- * - Required for DAO participation
- */
-
 contract CryptValtToken {
 
-    // ── ERC-20 Standard ────────────────────────────────────
     string  public constant name     = "CryptValt Token";
     string  public constant symbol   = "CVT";
     uint8   public constant decimals = 18;
+    uint256 public constant TOTAL_SUPPLY = 100_000_000 * 10**18;
 
-    uint256 public constant TOTAL_SUPPLY = 100_000_000 * 10**18; // 100M CVT
-
-    // ── Distribution ───────────────────────────────────────
     uint256 public constant COMMUNITY_ALLOC   = 40_000_000 * 10**18;
     uint256 public constant TEAM_ALLOC        = 20_000_000 * 10**18;
     uint256 public constant TREASURY_ALLOC    = 15_000_000 * 10**18;
     uint256 public constant ECOSYSTEM_ALLOC   = 15_000_000 * 10**18;
     uint256 public constant LIQUIDITY_ALLOC   = 10_000_000 * 10**18;
 
-    // ── Vesting ─────────────────────────────────────────────
-    uint256 public constant VESTING_DURATION  = 730 days; // 2 years
-    uint256 public constant VESTING_CLIFF     = 180 days; // 6 month cliff
+    uint256 public constant VESTING_DURATION  = 730 days;
+    uint256 public constant VESTING_CLIFF     = 180 days;
 
-    // ── State ──────────────────────────────────────────────
     address public owner;
     address public treasury;
     address public cryptvalt;
@@ -55,7 +27,6 @@ contract CryptValtToken {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
-    // Vesting schedules
     struct VestingSchedule {
         uint256 total;
         uint256 released;
@@ -66,7 +37,6 @@ contract CryptValtToken {
     }
     mapping(address => VestingSchedule) public vestingSchedules;
 
-    // Staking
     mapping(address => uint256) public stakedBalance;
     mapping(address => uint256) public stakeTimestamp;
     mapping(address => uint256) public stakingRewards;
@@ -74,10 +44,8 @@ contract CryptValtToken {
     uint256 public rewardPerToken;
     mapping(address => uint256) public rewardDebt;
 
-    // Burn tracking
     uint256 public totalBurned;
 
-    // ── Events ─────────────────────────────────────────────
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner_, address indexed spender, uint256 value);
     event Staked(address indexed user, uint256 amount);
@@ -88,32 +56,25 @@ contract CryptValtToken {
     event VestingCreated(address indexed beneficiary, uint256 total);
     event VestingReleased(address indexed beneficiary, uint256 amount);
     event VestingRevoked(address indexed beneficiary);
-    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
+    event TreasuryUpdated(address indexed newTreasury);
+    event CryptValtSet(address indexed cryptvalt);
 
-    modifier onlyOwner()  { require(msg.sender == owner,    "Not owner");  _; }
-    modifier notPaused()  { require(!transfersPaused,       "Paused");     _; }
+    modifier onlyOwner()  { require(msg.sender == owner, "Not owner");  _; }
+    modifier notPaused()  { require(!transfersPaused, "Paused");     _; }
 
     constructor(address _treasury) {
+        require(_treasury != address(0), "Zero treasury");
         owner      = msg.sender;
         treasury   = _treasury;
         deployedAt = block.timestamp;
 
-        // Mint all tokens to owner for distribution
         balanceOf[msg.sender] = TOTAL_SUPPLY;
         emit Transfer(address(0), msg.sender, TOTAL_SUPPLY);
 
-        // Immediately allocate treasury
         _transfer(msg.sender, _treasury, TREASURY_ALLOC);
-
-        // Liquidity to owner for DEX listing
-        // (LIQUIDITY_ALLOC stays with owner)
-
-        // Community rewards pool stays with owner until distributed
-        // Team vesting set up separately via createVesting()
-        // Ecosystem allocated via transfer as partnerships form
+        // Liquidity allocation stays with owner for DEX listing.
     }
 
-    // ── ERC-20 ─────────────────────────────────────────────
     function totalSupply() external view returns (uint256) {
         return TOTAL_SUPPLY - totalBurned;
     }
@@ -134,6 +95,7 @@ contract CryptValtToken {
     }
 
     function approve(address spender, uint256 amount) external returns (bool) {
+        require(spender != address(0), "Zero spender");
         allowance[msg.sender][spender] = amount;
         emit Approval(msg.sender, spender, amount);
         return true;
@@ -147,7 +109,6 @@ contract CryptValtToken {
         emit Transfer(from, to, amount);
     }
 
-    // ── Burn ───────────────────────────────────────────────
     function burn(uint256 amount) external {
         require(balanceOf[msg.sender] >= amount, "Insufficient balance");
         balanceOf[msg.sender] -= amount;
@@ -156,7 +117,6 @@ contract CryptValtToken {
         emit Burned(msg.sender, amount);
     }
 
-    // Platform burns tokens from fees — deflationary mechanism
     function burnFromFees(uint256 amount) external {
         require(msg.sender == cryptvalt || msg.sender == owner, "Not authorized");
         require(balanceOf[address(this)] >= amount, "Insufficient contract balance");
@@ -166,10 +126,9 @@ contract CryptValtToken {
         emit Burned(address(this), amount);
     }
 
-    // ── Staking ────────────────────────────────────────────
     function stake(uint256 amount) external notPaused {
-        require(amount > 0,                         "Zero amount");
-        require(balanceOf[msg.sender] >= amount,    "Insufficient balance");
+        require(amount > 0, "Zero amount");
+        require(balanceOf[msg.sender] >= amount, "Insufficient balance");
 
         _claimReward(msg.sender);
 
@@ -214,9 +173,11 @@ contract CryptValtToken {
 
     function depositReward(uint256 amount) external {
         require(msg.sender == owner || msg.sender == cryptvalt, "Not authorized");
+        require(amount > 0, "Zero amount");
         require(balanceOf[msg.sender] >= amount, "Insufficient balance");
-        require(totalStaked > 0, "No stakers to reward yet");
-        rewardPerToken += amount / totalStaked;
+        if (totalStaked > 0) {
+            rewardPerToken += amount / totalStaked;
+        }
         balanceOf[msg.sender]    -= amount;
         balanceOf[address(this)] += amount;
         emit RewardDeposited(amount);
@@ -228,7 +189,6 @@ contract CryptValtToken {
         return earned + stakingRewards[user];
     }
 
-    // ── Vesting ────────────────────────────────────────────
     function createVesting(
         address beneficiary,
         uint256 total,
@@ -236,9 +196,9 @@ contract CryptValtToken {
         uint256 duration,
         uint256 cliff
     ) external onlyOwner {
-        require(beneficiary != address(0),                 "Zero address");
-        require(vestingSchedules[beneficiary].total == 0,  "Already has vesting");
-        require(balanceOf[msg.sender] >= total,            "Insufficient balance");
+        require(beneficiary != address(0), "Zero address");
+        require(vestingSchedules[beneficiary].total == 0, "Already has vesting");
+        require(balanceOf[msg.sender] >= total, "Insufficient balance");
 
         balanceOf[msg.sender]        -= total;
         balanceOf[address(this)]     += total;
@@ -257,8 +217,8 @@ contract CryptValtToken {
 
     function releaseVesting() external {
         VestingSchedule storage v = vestingSchedules[msg.sender];
-        require(v.total > 0,   "No vesting schedule");
-        require(!v.revoked,    "Vesting revoked");
+        require(v.total > 0, "No vesting schedule");
+        require(!v.revoked, "Vesting revoked");
 
         uint256 vested    = vestedAmount(msg.sender);
         uint256 releasable = vested - v.released;
@@ -284,6 +244,7 @@ contract CryptValtToken {
     }
 
     function revokeVesting(address beneficiary) external onlyOwner {
+        require(beneficiary != address(0), "Zero address");
         VestingSchedule storage v = vestingSchedules[beneficiary];
         require(!v.revoked, "Already revoked");
 
@@ -307,23 +268,21 @@ contract CryptValtToken {
         emit VestingRevoked(beneficiary);
     }
 
-    // ── Utility Functions ──────────────────────────────────
     function getFeeDiscount(address user) external view returns (uint256 discountBPS) {
         uint256 bal = balanceOf[user] + stakedBalance[user];
-        if      (bal >= 100_000 * 10**18) return 5000; // 50% discount — 100k+ CVT
-        else if (bal >= 50_000  * 10**18) return 3000; // 30% discount — 50k+ CVT
-        else if (bal >= 10_000  * 10**18) return 2000; // 20% discount — 10k+ CVT
-        else if (bal >= 1_000   * 10**18) return 1000; // 10% discount — 1k+ CVT
-        else if (bal >= 100     * 10**18) return 500;  // 5% discount  — 100+ CVT
+        if      (bal >= 100_000 * 10**18) return 5000;
+        else if (bal >= 50_000  * 10**18) return 3000;
+        else if (bal >= 10_000  * 10**18) return 2000;
+        else if (bal >= 1_000   * 10**18) return 1000;
+        else if (bal >= 100     * 10**18) return 500;
         return 0;
     }
 
+    // For DAO voting power calculation — simply returns balance + 2x staked
     function getVotingPower(address user) external view returns (uint256) {
-        // Staked tokens = 2x voting power, unstaked = 1x
         return balanceOf[user] + (stakedBalance[user] * 2);
     }
 
-    // ── View ───────────────────────────────────────────────
     function getTokenStats() external view returns (
         uint256 supply, uint256 burned, uint256 staked,
         uint256 circulatingSupply
@@ -342,18 +301,20 @@ contract CryptValtToken {
         return (stakedBalance[user], pendingReward(user), stakeTimestamp[user]);
     }
 
-    // ── Admin ──────────────────────────────────────────────
-    function setCryptValt(address c) external onlyOwner { cryptvalt = c; }
-    function pauseTransfers()  external onlyOwner { transfersPaused = true; }
-    function unpauseTransfers() external onlyOwner { transfersPaused = false; }
-    function updateTreasury(address t) external onlyOwner { treasury = t; }
-
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Zero address");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
+    function setCryptValt(address c) external onlyOwner {
+        require(c != address(0), "Zero address");
+        cryptvalt = c;
+        emit CryptValtSet(c);
     }
 
-    // Allow contract to receive ETH for reward distribution
+    function pauseTransfers()  external onlyOwner { transfersPaused = true; }
+    function unpauseTransfers() external onlyOwner { transfersPaused = false; }
+
+    function updateTreasury(address t) external onlyOwner {
+        require(t != address(0), "Zero address");
+        treasury = t;
+        emit TreasuryUpdated(t);
+    }
+
     receive() external payable {}
 }

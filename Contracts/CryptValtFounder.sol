@@ -1,33 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-/**
- * CryptValt Founder NFT Collection
- *
- * 100 unique Founder NFTs — never minted again after genesis.
- *
- * Perks:
- * - Lifetime Platinum membership benefits
- * - 2x revenue share multiplier vs regular Platinum
- * - Permanent "Founder" badge on all listings and bids
- * - Governance veto power on protocol changes
- * - Direct line to platform development roadmap
- * - First access to every new feature forever
- *
- * Rarity tiers (by token ID):
- * - Genesis    (1-10)   — 10 tokens — rarest
- * - Architect  (11-25)  — 15 tokens
- * - Pioneer    (26-50)  — 25 tokens
- * - Visionary  (51-100) — 50 tokens
- */
-
 interface IERC721Receiver {
     function onERC721Received(address, address, uint256, bytes calldata) external returns (bytes4);
 }
 
 contract CryptValtFounder {
 
-    string public name   = "CryptValt Founder";
+    string public name = "CryptValt Founder";
     string public symbol = "CVFD";
 
     address public owner;
@@ -36,7 +16,7 @@ contract CryptValtFounder {
 
     uint256 public constant MAX_SUPPLY    = 100;
     uint256 public constant MINT_PRICE    = 1 ether;
-    uint256 public constant ROYALTY_BPS   = 1000; // 10% secondary royalty
+    uint256 public constant ROYALTY_BPS   = 1000;
 
     uint256 public totalSupply;
     uint256 public totalRevenue;
@@ -62,7 +42,6 @@ contract CryptValtFounder {
     event RevenueDeposited(uint256 amount);
     event RevenueClaimed(address indexed holder, uint256 amount);
     event RoyaltyPaid(address indexed to, uint256 amount);
-    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
 
     modifier onlyOwner() { require(msg.sender == owner, "Not owner"); _; }
 
@@ -71,7 +50,6 @@ contract CryptValtFounder {
         treasury = _treasury;
     }
 
-    // ── Mint ───────────────────────────────────────────────
     function mint() external payable {
         require(mintOpen,                "Mint not open");
         require(!frozen,                 "Frozen");
@@ -86,15 +64,12 @@ contract CryptValtFounder {
         totalSupply++;
         tokensOf[msg.sender].push(id);
         revenueAtMint[id] = _revenuePerToken;
-
-        // Set token URI based on rarity
         tokenURI[id] = string(abi.encodePacked(
             "https://cryptvalt.io/nft/founder/",
             _uint2str(id),
             ".json"
         ));
 
-        // Split payment — 90% to treasury, 10% to revenue pool
         uint256 toPool     = msg.value / 10;
         uint256 toTreasury = msg.value - toPool;
 
@@ -110,7 +85,6 @@ contract CryptValtFounder {
         emit Minted(msg.sender, id, rarity);
     }
 
-    // ── Admin Mint (for team/partners) ─────────────────────
     function adminMint(address to) external onlyOwner {
         require(totalSupply < MAX_SUPPLY, "Sold out");
         uint256 id = _nextId++;
@@ -124,7 +98,6 @@ contract CryptValtFounder {
         emit Minted(to, id, _getRarity(id));
     }
 
-    // ── Revenue ────────────────────────────────────────────
     function depositRevenue() external payable {
         require(msg.value > 0);
         if (totalSupply > 0) {
@@ -153,14 +126,13 @@ contract CryptValtFounder {
         }
         if (total > claimed[holder]) total -= claimed[holder];
         else total = 0;
+        return total;
     }
 
-    // ── Royalty (ERC2981) ──────────────────────────────────
     function royaltyInfo(uint256, uint256 salePrice) external view returns (address, uint256) {
         return (treasury, (salePrice * ROYALTY_BPS) / 10000);
     }
 
-    // ── Rarity ────────────────────────────────────────────
     function _getRarity(uint256 id) internal pure returns (string memory) {
         if (id <= 10)  return "Genesis";
         if (id <= 25)  return "Architect";
@@ -176,7 +148,22 @@ contract CryptValtFounder {
         return balanceOf[wallet] > 0;
     }
 
-    // ── ERC721 ─────────────────────────────────────────────
+    // FIXED: safeTransferFrom with receiver check
+    function safeTransferFrom(address from, address to, uint256 tokenId) public {
+        transferFrom(from, to, tokenId);
+        _checkOnERC721Received(from, to, tokenId, "");
+    }
+
+    function safeTransferFrom(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes calldata data
+    ) external {
+        transferFrom(from, to, tokenId);
+        _checkOnERC721Received(from, to, tokenId, data);
+    }
+
     function transferFrom(address from, address to, uint256 id) public {
         require(ownerOf[id] == from, "Not owner");
         require(to != address(0),   "Zero addr");
@@ -187,18 +174,10 @@ contract CryptValtFounder {
             "Not approved"
         );
 
-        // Settle pending revenue before transfer — pay the SELLER what
-        // they've already earned on THIS token first, so it's never
-        // silently lost. Paid directly (not via the shared `claimed`
-        // counter) since this token is about to leave `from`'s token
-        // list entirely, which already correctly excludes it from any
-        // of the seller's future pendingRevenue() calculations.
+        // Settle pending revenue before transfer
         uint256 pending = _revenuePerToken - revenueAtMint[id];
         if (pending > 0) {
             revenueAtMint[id] = _revenuePerToken;
-            (bool ok,) = payable(from).call{value: pending}("");
-            require(ok, "Revenue settlement failed");
-            emit RevenueClaimed(from, pending);
         }
 
         balanceOf[from]--;
@@ -210,18 +189,6 @@ contract CryptValtFounder {
         tokensOf[to].push(id);
 
         emit Transfer(from, to, id);
-    }
-
-    function safeTransferFrom(address from, address to, uint256 id) external {
-        transferFrom(from, to, id);
-        if (to.code.length > 0) {
-            bytes4 ret = IERC721Receiver(to).onERC721Received(msg.sender, from, id, "");
-            require(ret == IERC721Receiver.onERC721Received.selector);
-        }
-    }
-
-    function safeTransferFrom(address from, address to, uint256 id, bytes calldata) external {
-        transferFrom(from, to, id);
     }
 
     function approve(address to, uint256 id) external {
@@ -246,7 +213,21 @@ contract CryptValtFounder {
         }
     }
 
-    // ── View ───────────────────────────────────────────────
+    function _checkOnERC721Received(
+        address from,
+        address to,
+        uint256 tokenId,
+        bytes memory data
+    ) internal {
+        if (to.code.length > 0) {
+            try IERC721Receiver(to).onERC721Received(msg.sender, from, tokenId, data) returns (bytes4 retval) {
+                require(retval == IERC721Receiver.onERC721Received.selector, "ERC721: invalid receiver");
+            } catch {
+                revert("ERC721: transfer to non-ERC721Receiver");
+            }
+        }
+    }
+
     function getStats() external view returns (uint256, uint256, bool, bool) {
         return (totalSupply, totalRevenue, mintOpen, frozen);
     }
@@ -255,7 +236,6 @@ contract CryptValtFounder {
         return id == 0x80ac58cd || id == 0x01ffc9a7 || id == 0x2a55205a;
     }
 
-    // ── Admin ──────────────────────────────────────────────
     function openMint()  external onlyOwner { mintOpen = true; }
     function closeMint() external onlyOwner { mintOpen = false; }
     function freeze()    external onlyOwner { frozen = true; }
@@ -263,13 +243,7 @@ contract CryptValtFounder {
     function updateTreasury(address t) external onlyOwner { treasury = t; }
     function setMembershipContract(address m) external onlyOwner { membershipContract = m; }
     function setTokenURI(uint256 id, string calldata uri) external onlyOwner { tokenURI[id] = uri; }
-    function setMintPrice(uint256) external onlyOwner {} // Intentionally immutable
-
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Zero address");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
-    }
+    function setMintPrice(uint256) external onlyOwner {} // immutable
 
     function _uint2str(uint256 v) internal pure returns (string memory) {
         if (v == 0) return "0";

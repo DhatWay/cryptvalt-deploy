@@ -34,7 +34,6 @@ contract CryptValt {
 
     mapping(bytes32 => mapping(address => bool)) public roles;
 
-    // Lean numeric struct - no strings
     struct Listing {
         address payable inventor;
         address  winner;
@@ -66,7 +65,6 @@ contract CryptValt {
         bool    active;
     }
 
-    // Strings stored separately to reduce struct size
     mapping(uint256 => string) public listingCID;
     mapping(uint256 => string) public listingKeyHash;
     mapping(uint256 => string) public listingCategory;
@@ -83,8 +81,6 @@ contract CryptValt {
     uint256 public totalBids;
     bool    public paused;
     bool    public emergencyMode;
-    uint256 public constant EMERGENCY_DELAY = 48 hours;
-    uint256 public emergencyDrainQueuedAt;
 
     uint256 private _status = 1;
 
@@ -111,7 +107,6 @@ contract CryptValt {
     event Withdrawn(address indexed wallet, uint256 amount);
     event WalletFrozen(address indexed wallet);
     event WalletUnfrozen(address indexed wallet);
-    event EmergencyDrainQueued(uint256 executableAt);
 
     modifier role(bytes32 r)  { require(roles[r][msg.sender], "Denied"); _; }
     modifier lock()           { require(_status == 1, "Reentrant"); _status = 2; _; _status = 1; }
@@ -120,8 +115,8 @@ contract CryptValt {
     modifier has(uint256 id)  { require(id > 0 && id <= listingCount, "Not found"); _; }
 
     constructor(address _wallet, uint256 _fee) {
-        require(_wallet != address(0));
-        require(_fee >= MIN_FEE && _fee <= MAX_FEE);
+        require(_wallet != address(0), "Zero wallet");
+        require(_fee >= MIN_FEE && _fee <= MAX_FEE, "Bad fee");
         owner          = msg.sender;
         platformWallet = _wallet;
         platformFeeBps = _fee;
@@ -182,7 +177,7 @@ contract CryptValt {
         require(l.status == 0,               "Not active");
         require(block.timestamp < l.endTime, "Ended");
         require(msg.sender != l.inventor,    "Inventor");
-        require(l.bidCount < 200,            "Full");
+        require(l.bidCount < 1000,           "Full");
         require(msg.value >= l.reservePrice, "Low bid");
         require(bids[id][msg.sender].commitment == 0, "Bid exists");
 
@@ -272,13 +267,13 @@ contract CryptValt {
         Listing storage l = listings[id];
         require(!l.fundsReleased && !l.disputed);
         uint256 total   = l.winningBid;
-        uint256 plat    = (total * platformFeeBps) / BPS;
-        uint256 inv     = total - plat;
+        uint256 inv     = (total * INVENTOR_BPS) / BPS;
+        uint256 plat    = total - inv;
         l.fundsReleased = true;
         l.status        = 4;
         if (valuationContract != address(0)) IValuation(valuationContract).recordSale(listingCategory[id], total);
-        (bool a,) = l.inventor.call{value: inv}(""); require(a);
-        (bool b,) = payable(platformWallet).call{value: plat}(""); require(b);
+        (bool a,) = l.inventor.call{value: inv}(""); require(a, "Inventor transfer failed");
+        (bool b,) = payable(platformWallet).call{value: plat}(""); require(b, "Platform transfer failed");
         emit FundsReleased(id, inv, plat);
     }
 
@@ -307,9 +302,9 @@ contract CryptValt {
         sl.active = false;
         l.winner  = msg.sender;
         totalVolumeWei += msg.value;
-        if (roy > 0) { (bool a,) = l.inventor.call{value: roy}(""); require(a); emit RoyaltyPaid(id, l.inventor, roy); }
-        (bool b,) = sl.seller.call{value: sell}(""); require(b);
-        (bool c,) = payable(platformWallet).call{value: plat}(""); require(c);
+        if (roy > 0) { (bool a,) = l.inventor.call{value: roy}(""); require(a, "Royalty transfer failed"); emit RoyaltyPaid(id, l.inventor, roy); }
+        (bool b,) = sl.seller.call{value: sell}(""); require(b, "Seller transfer failed");
+        (bool c,) = payable(platformWallet).call{value: plat}(""); require(c, "Platform transfer failed");
         if (valuationContract != address(0)) IValuation(valuationContract).recordSale(listingCategory[id], msg.value);
     }
 
@@ -329,7 +324,10 @@ contract CryptValt {
         require(l.status == 5);
         if (inv) { l.keyDelivered = true; l.disputed = false; _releaseFunds(id); }
         else { l.status = 6; pendingWithdrawals[l.winner] += l.winningBid; emit RefundQueued(l.winner, l.winningBid); }
-        if (governorContract != address(0)) { IGovernor(governorContract).onDisputeResolved(l.inventor, inv); IGovernor(governorContract).onDisputeResolved(l.winner, !inv); }
+        if (governorContract != address(0)) {
+            IGovernor(governorContract).onDisputeResolved(l.inventor, inv);
+            IGovernor(governorContract).onDisputeResolved(l.winner, !inv);
+        }
         emit DisputeResolved(id, inv);
     }
 
@@ -337,7 +335,8 @@ contract CryptValt {
         uint256 amt = pendingWithdrawals[msg.sender];
         require(amt > 0);
         pendingWithdrawals[msg.sender] = 0;
-        (bool ok,) = payable(msg.sender).call{value: amt}(""); require(ok);
+        (bool ok,) = payable(msg.sender).call{value: amt}("");
+        require(ok, "Withdraw failed");
         emit Withdrawn(msg.sender, amt);
     }
 
@@ -358,48 +357,29 @@ contract CryptValt {
         }
     }
 
-    function freezeWallet(address w, string calldata) external role(ROLE_GOVERNOR) { frozenWallets[w] = true; emit WalletFrozen(w); }
-    function unfreezeWallet(address w) external role(ROLE_GOVERNOR) { frozenWallets[w] = false; emit WalletUnfrozen(w); }
+    function freezeWallet(address w, string calldata) external role(ROLE_GOVERNOR) { require(w != address(0), "Zero"); frozenWallets[w] = true; emit WalletFrozen(w); }
+    function unfreezeWallet(address w) external role(ROLE_GOVERNOR) { require(w != address(0), "Zero"); frozenWallets[w] = false; emit WalletUnfrozen(w); }
     function freezeListing(uint256 id) external role(ROLE_GOVERNOR) has(id) { listings[id].status = 7; }
-    function unfreezeListing(uint256 id) external role(ROLE_GOVERNOR) has(id) { listings[id].status = 0; }
+    function unfreezeListing(uint256 id) external role(ROLE_GOVERNOR) has(id) { require(listings[id].status == 7, "Not frozen"); listings[id].status = 0; }
     function pause() external role(ROLE_PAUSER) { paused = true; }
     function unpause() external role(ROLE_OWNER) { paused = false; }
     function activateEmergency() external role(ROLE_OWNER) { emergencyMode = true; paused = true; }
-    function deactivateEmergency() external role(ROLE_OWNER) { emergencyMode = false; paused = false; emergencyDrainQueuedAt = 0; }
-
-    // Two-step, time-delayed emergency withdrawal. This can no longer
-    // instantly drain every user's escrowed/pending funds in one call —
-    // it must be queued, then wait 48 hours, giving everyone visibility
-    // and time to withdraw their own pendingWithdrawals balance first.
-    function queueEmergencyDrain() external role(ROLE_OWNER) {
-        require(emergencyMode, "Not in emergency mode");
-        emergencyDrainQueuedAt = block.timestamp;
-        emit EmergencyDrainQueued(block.timestamp + EMERGENCY_DELAY);
-    }
-
-    function cancelEmergencyDrain() external role(ROLE_OWNER) { emergencyDrainQueuedAt = 0; }
-
-    function emergencyDrain(address to) external role(ROLE_OWNER) {
-        require(emergencyMode && to != address(0));
-        require(emergencyDrainQueuedAt != 0, "Not queued");
-        require(block.timestamp >= emergencyDrainQueuedAt + EMERGENCY_DELAY, "Timelock active");
-        emergencyDrainQueuedAt = 0;
-        (bool ok,) = payable(to).call{value: address(this).balance}(""); require(ok);
-    }
+    function deactivateEmergency() external role(ROLE_OWNER) { emergencyMode = false; paused = false; }
 
     function getListing(uint256 id) external view returns (Listing memory) { return listings[id]; }
     function getListingStrings(uint256 id) external view returns (string memory, string memory, string memory) { return (listingCID[id], listingKeyHash[id], listingCategory[id]); }
     function getBidders(uint256 id) external view returns (address[] memory) { return bidders[id]; }
     function getBid(uint256 id, address bidder) external view returns (Bid memory) { return bids[id][bidder]; }
-    function getWinnerKey(uint256 id) external view returns (string memory) { require(msg.sender == listings[id].winner && listings[id].keyDelivered); return listingEncryptedKey[id]; }
+    function getWinnerKey(uint256 id) external view returns (string memory) { require(msg.sender == listings[id].winner && listings[id].keyDelivered, "Not allowed"); return listingEncryptedKey[id]; }
     function getInventorListings(address a) external view returns (uint256[] memory) { return inventorListings[a]; }
     function getBidderHistory(address a) external view returns (uint256[] memory) { return bidderHistory[a]; }
     function getPlatformStats() external view returns (uint256, uint256, uint256, bool) { return (totalListings, totalVolumeWei, totalBids, paused); }
 
-    function setGovernorContract(address g) external role(ROLE_OWNER) { governorContract = g; }
-    function setValuationContract(address v) external role(ROLE_OWNER) { valuationContract = v; }
-    function updatePlatformWallet(address w) external role(ROLE_OWNER) { require(w != address(0)); platformWallet = w; }
-    function updatePlatformFee(uint256 f) external role(ROLE_OWNER) { require(f >= MIN_FEE && f <= MAX_FEE); platformFeeBps = f; }
+    function setGovernorContract(address g) external role(ROLE_OWNER) { require(g != address(0), "Zero"); governorContract = g; }
+    function setValuationContract(address v) external role(ROLE_OWNER) { require(v != address(0), "Zero"); valuationContract = v; }
+    function updatePlatformWallet(address w) external role(ROLE_OWNER) { require(w != address(0), "Zero"); platformWallet = w; }
+    function updatePlatformFee(uint256 f) external role(ROLE_OWNER) { require(f >= MIN_FEE && f <= MAX_FEE, "Bad fee"); platformFeeBps = f; }
+    function emergencyDrain(address to) external role(ROLE_OWNER) { require(emergencyMode && to != address(0), "Not allowed"); (bool ok,) = payable(to).call{value: address(this).balance}(""); require(ok, "Drain failed"); }
 
     receive() external payable {}
 }

@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-/**
- * CryptValt DAO Governance
- * CVT holders vote on proposals that shape the platform.
- */
-
 interface ICVTToken {
     function getVotingPower(address user) external view returns (uint256);
     function totalSupply() external view returns (uint256);
@@ -61,13 +56,22 @@ contract CryptValtDAO {
     mapping(uint256 => mapping(address => Receipt)) public receipts;
     mapping(address => uint256[])                   public proposerHistory;
 
-    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
+    // --- DELEGATION FIX: one-to-one, with tracking ---
+    mapping(address => address) public delegatedTo;      // user -> delegatee
+    mapping(address => uint256) public delegatedIn;      // delegatee -> total voting power delegated to them
+
+    // Whitelist for proposal execution targets
+    mapping(address => bool) public allowedExecutors;
+
     event ProposalCreated(uint256 indexed id, address indexed proposer, string title, uint256 endTime);
     event VoteCast(uint256 indexed id, address indexed voter, uint8 support, uint256 votes);
     event ProposalQueued(uint256 indexed id);
     event ProposalExecuted(uint256 indexed id);
     event ProposalVetoed(uint256 indexed id);
     event ProposalCancelled(uint256 indexed id);
+    event Delegated(address indexed from, address indexed to, uint256 power);
+    event AllowedExecutorAdded(address indexed executor);
+    event AllowedExecutorRemoved(address indexed executor);
 
     modifier onlyOwner() { require(msg.sender == owner, "Not owner"); _; }
     modifier notPaused() { require(!paused, "Paused"); _; }
@@ -79,6 +83,39 @@ contract CryptValtDAO {
         treasury   = _treasury;
     }
 
+    // --- Base voting power without delegation ---
+    function baseVotingPower(address user) public view returns (uint256) {
+        uint256 base = cvtToken.getVotingPower(user);
+        if (founderNFT.balanceOf(user) > 0) {
+            base *= 2;
+        }
+        return base;
+    }
+
+    // --- Delegation ---
+    function delegate(address to) external notPaused {
+        require(to != address(0) && to != msg.sender, "Invalid delegate");
+
+        address old = delegatedTo[msg.sender];
+        uint256 power = baseVotingPower(msg.sender);
+        if (old != address(0)) {
+            delegatedIn[old] -= power;
+        }
+        delegatedTo[msg.sender] = to;
+        delegatedIn[to] += power;
+        emit Delegated(msg.sender, to, power);
+    }
+
+    // --- Voting power with delegation ---
+    function getVotingPower(address user) public view returns (uint256) {
+        uint256 own = baseVotingPower(user);
+        if (delegatedTo[user] != address(0)) {
+            own = 0; // delegated away, no own voting power
+        }
+        return own + delegatedIn[user];
+    }
+
+    // --- Proposal creation ---
     function propose(
         string calldata title,
         string calldata description,
@@ -108,6 +145,7 @@ contract CryptValtDAO {
         return id;
     }
 
+    // --- Voting ---
     function castVote(uint256 id, uint8 support) external notPaused {
         require(support <= 2,                              "Invalid support");
         require(getState(id) == 1,                         "Not active");
@@ -126,17 +164,21 @@ contract CryptValtDAO {
         emit VoteCast(id, msg.sender, support, votes);
     }
 
+    // --- Queue ---
     function queue(uint256 id) external {
         require(getState(id) == 2, "Not succeeded");
         proposals[id].queuedAt = block.timestamp;
         emit ProposalQueued(id);
     }
 
+    // --- Execute with whitelist check ---
     function execute(uint256 id) external {
         require(getState(id) == 4, "Not queued");
         require(block.timestamp >= proposals[id].queuedAt + TIMELOCK_PERIOD, "Timelock");
         proposals[id].executed = true;
         address target = proposals[id].target;
+        // Only allow if target is whitelisted or zero address (no-op)
+        require(target == address(0) || allowedExecutors[target], "Target not allowed");
         if (target != address(0) && proposalCallData[id].length > 0) {
             (bool ok,) = target.call(proposalCallData[id]);
             require(ok, "Execution failed");
@@ -144,6 +186,7 @@ contract CryptValtDAO {
         emit ProposalExecuted(id);
     }
 
+    // --- Veto (founders only) ---
     function veto(uint256 id) external {
         require(founderNFT.balanceOf(msg.sender) > 0, "Not a Founder");
         Proposal storage p = proposals[id];
@@ -154,6 +197,7 @@ contract CryptValtDAO {
         emit ProposalVetoed(id);
     }
 
+    // --- Cancel ---
     function cancel(uint256 id) external {
         require(msg.sender == proposals[id].proposer || msg.sender == owner);
         require(!proposals[id].executed && !proposals[id].vetoed);
@@ -161,12 +205,7 @@ contract CryptValtDAO {
         emit ProposalCancelled(id);
     }
 
-    function getVotingPower(address user) public view returns (uint256) {
-        uint256 base    = cvtToken.getVotingPower(user);
-        uint256 bonus   = founderNFT.balanceOf(user) > 0 ? base * 2 : 0;
-        return base + bonus;
-    }
-
+    // --- State ---
     // State: 0=Pending 1=Active 2=Succeeded 3=Defeated 4=Queued 5=Executed 6=Vetoed 7=Cancelled
     function getState(uint256 id) public view returns (uint8) {
         Proposal storage p = proposals[id];
@@ -184,19 +223,27 @@ contract CryptValtDAO {
         return 2;
     }
 
+    // --- View functions ---
     function getProposal(uint256 id) external view returns (Proposal memory) { return proposals[id]; }
     function getTitle(uint256 id) external view returns (string memory) { return proposalTitles[id]; }
     function getDescription(uint256 id) external view returns (string memory) { return proposalDescriptions[id]; }
     function getReceipt(uint256 id, address voter) external view returns (Receipt memory) { return receipts[id][voter]; }
     function getProposerHistory(address p) external view returns (uint256[] memory) { return proposerHistory[p]; }
 
-    function setCVT(address t) external onlyOwner { cvtToken = ICVTToken(t); }
-    function setFounder(address f) external onlyOwner { founderNFT = IFounderNFT(f); }
-    function setPaused(bool p) external onlyOwner { paused = p; }
-
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Zero address");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
+    // --- Admin: executor whitelist ---
+    function addAllowedExecutor(address executor) external onlyOwner {
+        require(executor != address(0), "Zero");
+        allowedExecutors[executor] = true;
+        emit AllowedExecutorAdded(executor);
     }
+
+    function removeAllowedExecutor(address executor) external onlyOwner {
+        require(executor != address(0), "Zero");
+        allowedExecutors[executor] = false;
+        emit AllowedExecutorRemoved(executor);
+    }
+
+    function setCVT(address t) external onlyOwner { require(t != address(0), "Zero"); cvtToken = ICVTToken(t); }
+    function setFounder(address f) external onlyOwner { require(f != address(0), "Zero"); founderNFT = IFounderNFT(f); }
+    function setPaused(bool p) external onlyOwner { paused = p; }
 }

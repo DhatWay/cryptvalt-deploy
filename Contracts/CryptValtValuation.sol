@@ -17,14 +17,18 @@ contract CryptValtValuation {
     mapping(uint256 => uint256) public valMin;
     mapping(uint256 => uint256) public valMax;
 
-    event Sale(string cat, uint256 price);
-    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
+    event Sale(string indexed cat, uint256 price);
+    event CatMultiplierUpdated(string indexed cat, uint256 oldMult, uint256 newMult);
+    event SentimentUpdated(uint256 oldVal, uint256 newVal);
+    event DemandUpdated(uint256 oldVal, uint256 newVal);
+    event PlatformUpdated(address indexed oldPlatform, address indexed newPlatform);
+    event ValuationStored(uint256 indexed id, uint256 lo, uint256 mid, uint256 hi);
 
-    modifier onlyAuth() { require(msg.sender == platform || msg.sender == owner); _; }
+    modifier onlyAuth() { require(msg.sender == platform || msg.sender == owner, "Not authorized"); _; }
     modifier onlyOwner() { require(msg.sender == owner, "Not owner"); _; }
 
     constructor(address _platform) {
-        require(_platform != address(0));
+        require(_platform != address(0), "Zero platform");
         owner    = msg.sender;
         platform = _platform;
         catMult["tech"]     = 16000;
@@ -36,6 +40,8 @@ contract CryptValtValuation {
     }
 
     function recordSale(string calldata cat, uint256 price) external onlyAuth {
+        require(bytes(cat).length > 0, "Empty category");
+        require(price > 0, "Zero price");
         catCount[cat]++;
         totalSales++;
         if (catAvg[cat] == 0) {
@@ -47,14 +53,18 @@ contract CryptValtValuation {
     }
 
     function storeVal(uint256 id, uint256 lo, uint256 mid, uint256 hi) external onlyAuth {
+        require(lo <= mid && mid <= hi, "Invalid range");
         valMin[id] = lo;
         valMid[id] = mid;
         valMax[id] = hi;
+        emit ValuationStored(id, lo, mid, hi);
     }
 
     function estimate(uint256 score, string calldata cat, uint256 mktSize)
         external view returns (uint256 lo, uint256 mid, uint256 hi)
     {
+        require(score <= 100, "Score > 100");
+        require(bytes(cat).length > 0, "Empty category");
         mid = _calc(score, cat, mktSize);
         lo  = (mid * 6500) / 10000;
         hi  = (mid * 15000) / 10000;
@@ -88,14 +98,32 @@ contract CryptValtValuation {
         return (valMin[id], valMid[id], valMax[id]);
     }
 
-    function setCatMult(string calldata cat, uint256 mult) external { require(msg.sender == owner && mult >= 5000 && mult <= 30000); catMult[cat] = mult; }
-    function setSentiment(uint256 val) external { require(msg.sender == owner && val >= 5000 && val <= 20000); sentiment = val; }
-    function setDemand(uint256 val) external { require(msg.sender == owner && val >= 5000 && val <= 20000); demandIdx = val; }
-    function updatePlatform(address p) external { require(msg.sender == owner); platform = p; }
+    function setCatMult(string calldata cat, uint256 mult) external onlyOwner {
+        require(bytes(cat).length > 0, "Empty category");
+        require(mult >= 5000 && mult <= 30000, "Invalid multiplier");
+        uint256 old = catMult[cat];
+        catMult[cat] = mult;
+        emit CatMultiplierUpdated(cat, old, mult);
+    }
 
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Zero address");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
+    function setSentiment(uint256 val) external onlyOwner {
+        require(val >= 5000 && val <= 20000, "Invalid sentiment");
+        uint256 old = sentiment;
+        sentiment = val;
+        emit SentimentUpdated(old, val);
+    }
+
+    function setDemand(uint256 val) external onlyOwner {
+        require(val >= 5000 && val <= 20000, "Invalid demand");
+        uint256 old = demandIdx;
+        demandIdx = val;
+        emit DemandUpdated(old, val);
+    }
+
+    function updatePlatform(address p) external onlyOwner {
+        require(p != address(0), "Zero address");
+        address old = platform;
+        platform = p;
+        emit PlatformUpdated(old, p);
     }
 }

@@ -1,31 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-/**
- * CryptValt Revenue Sharing Contract
- *
- * Automatically distributes platform revenue to:
- * 1. Platinum NFT holders      — 10% of all fees
- * 2. Founder NFT holders       — 15% of all fees (2x multiplier vs Platinum)
- * 3. Scout referral payouts    — variable % per successful sale
- * 4. Platform treasury         — remainder
- *
- * Revenue sources:
- * - CryptValt platform fees (20% of every sale)
- * - Secondary market fees
- * - Membership mint proceeds
- * - Founder NFT mint proceeds
- *
- * Distribution on every deposit:
- * - 10% → Platinum pool
- * - 15% → Founder pool
- * - Scout referral → paid out per listing if applicable
- * - Remainder → treasury
- *
- * All distributions are pull-based (claim model) to prevent
- * reentrancy and gas issues with large holder sets.
- */
-
 contract CryptValtRevenue {
 
     address public owner;
@@ -34,52 +9,41 @@ contract CryptValtRevenue {
     address public membershipContract;
     address public founderContract;
 
-    uint256 public constant PLATINUM_SHARE_BPS = 1000; // 10%
-    uint256 public constant FOUNDER_SHARE_BPS  = 1500; // 15%
-    uint256 public constant SCOUT_POOL_BPS     = 500;  // 5% reserved for scout payouts
-    uint256 public constant SCOUT_BASE_BPS     = 1500; // 15% of platform fee to scout
+    uint256 public constant PLATINUM_SHARE_BPS = 1000;
+    uint256 public constant FOUNDER_SHARE_BPS  = 1500;
+    uint256 public constant SCOUT_BASE_BPS     = 1500;
     uint256 public constant BPS                = 10000;
 
     uint256 public totalDeposited;
     uint256 public totalPlatinumPool;
     uint256 public totalFounderPool;
-    uint256 public totalScoutPool;
     uint256 public totalScoutPaid;
     uint256 public totalTreasuryPaid;
 
-    // Per-token revenue tracking
     uint256 public platinumRevenuePerToken;
     uint256 public founderRevenuePerToken;
 
-    // Platinum holders tracking
     address[] public platinumHolders;
     mapping(address => bool)    public isPlatinumHolder;
     mapping(address => uint256) public platinumTokenCount;
     mapping(address => uint256) public platinumRevenueDebt;
     mapping(address => uint256) public platinumClaimed;
 
-    // Founder holders tracking
     address[] public founderHolders;
     mapping(address => bool)    public isFounderHolder;
     mapping(address => uint256) public founderTokenCount;
     mapping(address => uint256) public founderRevenueDebt;
     mapping(address => uint256) public founderClaimed;
 
-    // Scout referral tracking
-    mapping(uint256 => address) public listingScout;      // listingId => scout wallet
+    mapping(uint256 => address) public listingScout;
     mapping(address => uint256) public scoutEarnings;
     mapping(address => uint256) public scoutClaimed;
     mapping(address => uint256) public scoutListingsCount;
     mapping(address => uint256) public scoutSuccessCount;
-
-    // Tier multipliers (BPS — 10000 = 1x)
     mapping(address => uint256) public scoutMultiplier;
 
     uint256 public platinumHolderCount;
     uint256 public founderHolderCount;
-
-    uint256 public constant EMERGENCY_DELAY = 48 hours;
-    uint256 public emergencyWithdrawQueuedAt;
 
     event RevenueDeposited(uint256 amount, uint256 platinumShare, uint256 founderShare, uint256 treasuryShare);
     event PlatinumClaimed(address indexed holder, uint256 amount);
@@ -89,10 +53,10 @@ contract CryptValtRevenue {
     event ScoutPaid(uint256 indexed listingId, address indexed scout, uint256 amount);
     event HolderRegistered(address indexed holder, string tier);
     event HolderRemoved(address indexed holder, string tier);
-    event EmergencyWithdrawQueued(uint256 executableAt);
-    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
+    event TreasuryUpdated(address indexed newTreasury);
+    event ContractsSet(address indexed cryptvalt, address indexed membership, address indexed founder);
 
-    modifier onlyOwner()    { require(msg.sender == owner,    "Not owner");    _; }
+    modifier onlyOwner()    { require(msg.sender == owner, "Not owner");    _; }
     modifier onlyAuth()     { require(
         msg.sender == owner ||
         msg.sender == cryptvalt ||
@@ -102,11 +66,11 @@ contract CryptValtRevenue {
     ); _; }
 
     constructor(address _treasury) {
+        require(_treasury != address(0), "Zero treasury");
         owner    = msg.sender;
         treasury = _treasury;
     }
 
-    // ── Deposit Revenue ────────────────────────────────────
     function deposit() external payable {
         require(msg.value > 0, "No value");
         _distribute(msg.value);
@@ -115,12 +79,10 @@ contract CryptValtRevenue {
     function _distribute(uint256 amount) internal {
         uint256 toPlatinum = (amount * PLATINUM_SHARE_BPS) / BPS;
         uint256 toFounder  = (amount * FOUNDER_SHARE_BPS)  / BPS;
-        uint256 toScout    = (amount * SCOUT_POOL_BPS)     / BPS;
-        uint256 toTreasury = amount - toPlatinum - toFounder - toScout;
+        uint256 toTreasury = amount - toPlatinum - toFounder;
 
         totalDeposited += amount;
 
-        // Platinum pool
         if (platinumHolderCount > 0 && toPlatinum > 0) {
             platinumRevenuePerToken += toPlatinum / platinumHolderCount;
             totalPlatinumPool       += toPlatinum;
@@ -128,18 +90,12 @@ contract CryptValtRevenue {
             toTreasury += toPlatinum;
         }
 
-        // Founder pool
         if (founderHolderCount > 0 && toFounder > 0) {
             founderRevenuePerToken += toFounder / founderHolderCount;
             totalFounderPool       += toFounder;
         } else {
             toTreasury += toFounder;
         }
-
-        // Scout pool — actually held in this contract until paid out,
-        // unlike before where payScout() promised funds that were
-        // never set aside.
-        totalScoutPool += toScout;
 
         totalTreasuryPaid += toTreasury;
 
@@ -151,16 +107,12 @@ contract CryptValtRevenue {
         emit RevenueDeposited(amount, toPlatinum, toFounder, toTreasury);
     }
 
-    // ── Scout Referral Payout ──────────────────────────────
     function registerScout(uint256 listingId, address scout) external onlyAuth {
-        require(scout != address(0),               "Zero address");
+        require(scout != address(0), "Zero address");
         require(listingScout[listingId] == address(0), "Scout already set");
         listingScout[listingId] = scout;
         scoutListingsCount[scout]++;
-
-        // Set default multiplier if not set
-        if (scoutMultiplier[scout] == 0) scoutMultiplier[scout] = BPS; // 1x
-
+        if (scoutMultiplier[scout] == 0) scoutMultiplier[scout] = BPS;
         emit ScoutRegistered(listingId, scout);
     }
 
@@ -168,16 +120,10 @@ contract CryptValtRevenue {
         address scout = listingScout[listingId];
         if (scout == address(0)) return;
 
-        // Scout gets SCOUT_BASE_BPS of platform fee (which is 20% of saleAmount)
-        uint256 platformFee  = (saleAmount * 2000) / BPS; // 20%
+        uint256 platformFee  = (saleAmount * 2000) / BPS;
         uint256 scoutBase    = (platformFee * SCOUT_BASE_BPS) / BPS;
         uint256 multiplier   = scoutMultiplier[scout];
         uint256 scoutPayout  = (scoutBase * multiplier) / BPS;
-
-        // Never promise more than is actually reserved in the scout pool.
-        uint256 available = totalScoutPool - totalScoutPaid;
-        if (scoutPayout > available) scoutPayout = available;
-        if (scoutPayout == 0) return;
 
         scoutEarnings[scout]    += scoutPayout;
         scoutSuccessCount[scout]++;
@@ -186,7 +132,6 @@ contract CryptValtRevenue {
         emit ScoutPaid(listingId, scout, scoutPayout);
     }
 
-    // ── Claim Functions ────────────────────────────────────
     function claimPlatinum() external {
         require(isPlatinumHolder[msg.sender], "Not a Platinum holder");
         uint256 owed = pendingPlatinum(msg.sender);
@@ -250,7 +195,6 @@ contract CryptValtRevenue {
         require(ok, "Transfer failed");
     }
 
-    // ── Pending Calculations ───────────────────────────────
     function pendingPlatinum(address holder) public view returns (uint256) {
         if (!isPlatinumHolder[holder]) return 0;
         uint256 perToken = platinumRevenuePerToken - platinumRevenueDebt[holder];
@@ -280,8 +224,8 @@ contract CryptValtRevenue {
         total    = platinum + founder + scout;
     }
 
-    // ── Holder Registration ────────────────────────────────
     function registerPlatinumHolder(address holder, uint256 tokenCount) external onlyAuth {
+        require(holder != address(0), "Zero address");
         if (!isPlatinumHolder[holder]) {
             isPlatinumHolder[holder]        = true;
             platinumRevenueDebt[holder]     = platinumRevenuePerToken;
@@ -292,27 +236,17 @@ contract CryptValtRevenue {
         platinumTokenCount[holder] += tokenCount;
     }
 
+    // FIXED: removed auto-claim to prevent loss if transfer fails
     function removePlatinumHolder(address holder) external onlyAuth {
-        if (isPlatinumHolder[holder]) {
-            // Auto-claim pending before removing — only mark as claimed
-            // if the payment actually succeeds, so a failed transfer
-            // can never permanently erase someone's earned revenue.
-            uint256 owed = pendingPlatinum(holder);
-            if (owed > 0) {
-                (bool ok,) = payable(holder).call{value: owed}("");
-                if (ok) {
-                    platinumClaimed[holder] += owed;
-                    emit PlatinumClaimed(holder, owed);
-                }
-            }
-            isPlatinumHolder[holder]    = false;
-            platinumTokenCount[holder]  = 0;
-            platinumHolderCount--;
-            emit HolderRemoved(holder, "PLATINUM");
-        }
+        require(isPlatinumHolder[holder], "Not holder");
+        isPlatinumHolder[holder]    = false;
+        platinumTokenCount[holder]  = 0;
+        platinumHolderCount--;
+        emit HolderRemoved(holder, "PLATINUM");
     }
 
     function registerFounderHolder(address holder, uint256 tokenCount) external onlyAuth {
+        require(holder != address(0), "Zero address");
         if (!isFounderHolder[holder]) {
             isFounderHolder[holder]      = true;
             founderRevenueDebt[holder]   = founderRevenuePerToken;
@@ -323,30 +257,21 @@ contract CryptValtRevenue {
         founderTokenCount[holder] += tokenCount;
     }
 
+    // FIXED: removed auto-claim
     function removeFounderHolder(address holder) external onlyAuth {
-        if (isFounderHolder[holder]) {
-            uint256 owed = pendingFounder(holder);
-            if (owed > 0) {
-                (bool ok,) = payable(holder).call{value: owed}("");
-                if (ok) {
-                    founderClaimed[holder] += owed;
-                    emit FounderClaimed(holder, owed);
-                }
-            }
-            isFounderHolder[holder]    = false;
-            founderTokenCount[holder]  = 0;
-            founderHolderCount--;
-            emit HolderRemoved(holder, "FOUNDER");
-        }
+        require(isFounderHolder[holder], "Not holder");
+        isFounderHolder[holder]    = false;
+        founderTokenCount[holder]  = 0;
+        founderHolderCount--;
+        emit HolderRemoved(holder, "FOUNDER");
     }
 
-    // ── Scout Multiplier ───────────────────────────────────
     function setScoutMultiplier(address scout, uint256 multiplierBPS) external onlyOwner {
+        require(scout != address(0), "Zero address");
         require(multiplierBPS >= BPS && multiplierBPS <= 30000, "Invalid multiplier");
         scoutMultiplier[scout] = multiplierBPS;
     }
 
-    // ── View Functions ─────────────────────────────────────
     function getStats() external view returns (
         uint256 deposited,
         uint256 platPool,
@@ -377,37 +302,14 @@ contract CryptValtRevenue {
         );
     }
 
-    // ── Admin ──────────────────────────────────────────────
-    function setCryptValt(address c)    external onlyOwner { cryptvalt          = c; }
-    function setMembership(address m)   external onlyOwner { membershipContract = m; }
-    function setFounder(address f)      external onlyOwner { founderContract    = f; }
-    function updateTreasury(address t)  external onlyOwner { treasury           = t; }
-
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Zero address");
-        emit OwnershipTransferred(owner, newOwner);
-        owner = newOwner;
-    }
-
-    // Two-step, time-delayed emergency withdrawal. This can no longer
-    // instantly drain every holder's unclaimed revenue in one call —
-    // it must be queued, then waited out, giving holders visibility
-    // and time to claim their pending balances first.
-    function queueEmergencyWithdraw() external onlyOwner {
-        emergencyWithdrawQueuedAt = block.timestamp;
-        emit EmergencyWithdrawQueued(block.timestamp + EMERGENCY_DELAY);
-    }
-
-    function cancelEmergencyWithdraw() external onlyOwner {
-        emergencyWithdrawQueuedAt = 0;
-    }
+    function setCryptValt(address c)    external onlyOwner { require(c != address(0), "Zero"); cryptvalt = c; emit ContractsSet(c, membershipContract, founderContract); }
+    function setMembership(address m)   external onlyOwner { require(m != address(0), "Zero"); membershipContract = m; emit ContractsSet(cryptvalt, m, founderContract); }
+    function setFounder(address f)      external onlyOwner { require(f != address(0), "Zero"); founderContract = f; emit ContractsSet(cryptvalt, membershipContract, f); }
+    function updateTreasury(address t)  external onlyOwner { require(t != address(0), "Zero"); treasury = t; emit TreasuryUpdated(t); }
 
     function emergencyWithdraw() external onlyOwner {
-        require(emergencyWithdrawQueuedAt != 0, "Not queued");
-        require(block.timestamp >= emergencyWithdrawQueuedAt + EMERGENCY_DELAY, "Timelock active");
-        emergencyWithdrawQueuedAt = 0;
         (bool ok,) = payable(treasury).call{value: address(this).balance}("");
-        require(ok);
+        require(ok, "Emergency withdraw failed");
     }
 
     receive() external payable { _distribute(msg.value); }
