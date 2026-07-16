@@ -16,7 +16,7 @@ const { ethers, run, network } = require('hardhat');
 const fs = require('fs');
 
 // ── Your wallet address — receives platform fees ───────────
-const OWNER_WALLET = '0x05248CD920dAeB2E5369A63Fe93367f9F1bf5677';
+const OWNER_WALLET = '0x640B8140cD4FB3CDA81c91D5C733C40d5509Cd56'; // CryptValt Safe (2-of-2 multisig)
 
 // ── Platform fee — 20% in basis points (2000 = 20%) ───────
 const PLATFORM_FEE = 2000;
