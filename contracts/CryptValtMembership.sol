@@ -54,6 +54,7 @@ contract CryptValtMembership {
     event Minted(address indexed to, uint256 indexed tokenId, uint8 tier, uint256 price);
     event RevenueDeposited(uint256 amount, uint256 perToken);
     event RevenueClaimed(address indexed holder, uint256 amount);
+    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
 
     modifier onlyOwner() { require(msg.sender == owner, "Not owner"); _; }
 
@@ -205,10 +206,19 @@ contract CryptValtMembership {
             "Not approved"
         );
 
+        // Pay the SELLER their earned Platinum revenue directly before
+        // transfer — paid directly (not via the shared revenueClaimed
+        // counter) since this token leaves `from`'s token list right
+        // after, which already excludes it from the seller's future
+        // pendingRevenue() calculations.
         if (tierOf[tokenId] == PLATINUM) {
             uint256 pending = _revenuePerToken - revenuePerTokenAtMint[tokenId];
             if (pending > 0) {
                 revenuePerTokenAtMint[tokenId] = _revenuePerToken;
+                unclaimedRevenue -= pending;
+                (bool ok,) = payable(from).call{value: pending}("");
+                require(ok, "Revenue settlement failed");
+                emit RevenueClaimed(from, pending);
             }
         }
 
@@ -282,6 +292,12 @@ contract CryptValtMembership {
     }
 
     function updateTreasury(address t) external onlyOwner { treasury = t; }
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Zero address");
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
 
     receive() external payable {}
 }
