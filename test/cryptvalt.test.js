@@ -295,9 +295,13 @@ describe("CryptValt v2.0", function () {
     it("handles small reward deposits without total precision loss", async function () {
       await token.connect(admin).transfer(bidder1.address, ethers.parseEther("1000000"));
       await token.connect(bidder1).stake(ethers.parseEther("1000000"));
-      await token.connect(admin).depositReward(1000n); // 1000 wei of CVT
-      // v1: (1000 / 1e24) = 0 → total loss. v2: scaled accumulator keeps it.
-      expect(await token.pendingReward(bidder1.address)).to.be.greaterThan(0);
+      // Deposit 0.5 CVT across 1,000,000 staked CVT.
+      // v1 (unscaled): 5e17 / 1e24 = 0 → the entire deposit was lost.
+      // v2 (1e18-scaled): stakers accrue it accurately.
+      await token.connect(admin).depositReward(ethers.parseEther("0.5"));
+      expect(await token.pendingReward(bidder1.address)).to.be.closeTo(
+        ethers.parseEther("0.5"), 1000n // tolerate wei-level rounding dust
+      );
     });
 
     it("vests linearly with cliff and revokes unvested to treasury", async function () {
