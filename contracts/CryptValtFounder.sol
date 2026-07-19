@@ -125,9 +125,6 @@ contract CryptValtFounder is ERC721, ERC721Enumerable, ERC2981, Ownable2Step, Re
 
         uint256 id = _nextId++;
 
-        // Snapshot baseline BEFORE pool update (self-revenue fix).
-        revenueBaselineOf[id] = _accRevenuePerToken;
-
         uint256 toHolders  = (msg.value * HOLDER_SHARE_BPS) / BPS;
         uint256 toTreasury = msg.value - toHolders;
 
@@ -138,6 +135,11 @@ contract CryptValtFounder is ERC721, ERC721Enumerable, ERC2981, Ownable2Step, Re
             // First mint: no prior holders — everything to treasury.
             toTreasury = msg.value;
         }
+
+        // Snapshot baseline AFTER the pool update from this mint's own
+        // payment (self-revenue fix): the new token's entitlement starts
+        // from here, excluding its own contribution.
+        revenueBaselineOf[id] = _accRevenuePerToken;
 
         _safeMint(msg.sender, id);
 

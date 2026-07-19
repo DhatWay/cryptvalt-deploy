@@ -142,9 +142,6 @@ contract CryptValtMembership is ERC721, ERC721Enumerable, ERC2981, Ownable2Step,
         uint256 toTreasury = msg.value;
 
         if (tier == TIER_PLATINUM) {
-            // Snapshot baseline BEFORE pool update (self-revenue fix).
-            revenueBaselineOf[id] = _accRevenuePerPlatinum;
-
             uint256 platBefore = platinumCount;
             if (platBefore > 0) {
                 uint256 toHolders = (msg.value * HOLDER_SHARE_BPS) / BPS;
@@ -152,6 +149,10 @@ contract CryptValtMembership is ERC721, ERC721Enumerable, ERC2981, Ownable2Step,
                 totalRevenue += toHolders;
                 toTreasury    = msg.value - toHolders;
             }
+            // Snapshot baseline AFTER the pool update from this mint's
+            // own payment (self-revenue fix): the new token's
+            // entitlement starts here, excluding its own contribution.
+            revenueBaselineOf[id] = _accRevenuePerPlatinum;
             platinumCount = platBefore + 1;
         }
 
