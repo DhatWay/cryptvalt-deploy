@@ -107,7 +107,7 @@ describe("CryptValt v2.0 — branch gap closer", function () {
       // emergency drain zero-address branch inside emergency mode
       await cryptvalt.connect(admin).activateEmergency();
       await expect(cryptvalt.connect(admin).emergencyDrain(ethers.ZeroAddress))
-        .to.be.revertedWithCustomError(cryptvalt, "NotInEmergency");
+        .to.be.revertedWithCustomError(cryptvalt, "ZeroAddress");
       await expect(cryptvalt.connect(admin).emergencyDrain(treasury.address))
         .to.be.revertedWithCustomError(cryptvalt, "NotQueued");
     });
