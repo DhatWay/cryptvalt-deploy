@@ -665,7 +665,7 @@ describe("CryptValt v2.0 — extended coverage", function () {
       // Verify boosts rep; wins add rep, cap at 1000
       await governor.connect(admin).verifyWallet(bidder2.address); // 500+150=650
       expect(await governor.getTier(bidder2.address)).to.equal("SILVER");
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 16; i++) {
         await governor.connect(admin).onDisputeResolved(bidder2.address, true);
       }
       expect(await governor.getReputation(bidder2.address)).to.equal(1000);
