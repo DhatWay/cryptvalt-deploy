@@ -1,32 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/*//////////////////////////////////////////////////////////////////////////
-                                CRYPTVALT v2.0
-            Sealed-Bid Idea Auction Escrow — OpenZeppelin Edition
-//////////////////////////////////////////////////////////////////////////*/
-
-import {AccessControlDefaultAdminRules} from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-
-/// @title CryptValt — Sealed-Bid Idea Auction Escrow
-/// @author CryptValt
-/// @notice Inventors list encrypted ideas, bidders place sealed
-///         (commit-reveal) bids, funds are escrowed and released 80/20
-///         (inventor/platform) upon decryption-key delivery.
-/// @dev v2.0 hardened release, built on OpenZeppelin audited bases:
-///      - AccessControlDefaultAdminRules: role system with two-step,
-///        time-delayed admin (Safe) transfer — cannot be bricked
-///      - ReentrancyGuard: audited nonReentrant modifier
-///      - Pausable: audited emergency-stop pattern
-///      Security fixes over v1:
-///      - Deposit-backed bids: revealed bid must be fully collateralized
-///      - O(1) settlement: winner tracked incrementally at reveal time
-///      - Pull-payment pattern for ALL payouts (no push transfers)
-///      - Timelocked fee & platform-wallet changes
-///      - Custom errors, full event coverage, on-chain solvency invariant
-
 interface IGovernor {
     function onListingCreated(uint256 id, address inventor) external;
     function onBidCommitted(uint256 id, address bidder) external;
@@ -41,83 +15,25 @@ interface IValuation {
     function recordSale(string calldata category, uint256 price) external;
 }
 
-contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable {
+contract CryptValt {
 
-    /*////////////////////////////////////////////////////////////////
-                                CONSTANTS
-    ////////////////////////////////////////////////////////////////*/
+    uint256 public constant INVENTOR_BPS     = 8000;
+    uint256 public constant BPS              = 10000;
+    uint256 public constant MAX_ROYALTY      = 1000;
+    uint256 public constant MIN_FEE          = 1000;
+    uint256 public constant MAX_FEE          = 3000;
+    uint256 public constant MIN_DUR          = 1 days;
+    uint256 public constant MAX_DUR          = 7 days;
+    uint256 public constant REVEAL_WIN       = 24 hours;
+    uint256 public constant KEY_WIN          = 48 hours;
 
-    uint256 public constant BPS             = 10_000;
-    uint256 public constant MAX_ROYALTY     = 1_000;  // 10%
-    uint256 public constant MIN_FEE         = 1_000;  // 10%
-    uint256 public constant MAX_FEE         = 3_000;  // 30%
-    uint256 public constant MIN_DUR         = 1 days;
-    uint256 public constant MAX_DUR         = 7 days;
-    uint256 public constant REVEAL_WIN      = 24 hours;
-    uint256 public constant KEY_WIN         = 48 hours;
-    uint256 public constant MAX_BIDDERS     = 500;
-    uint256 public constant ADMIN_TIMELOCK  = 24 hours;
-    uint256 public constant EMERGENCY_DELAY = 48 hours;
+    bytes32 public constant ROLE_OWNER    = keccak256("OWNER");
+    bytes32 public constant ROLE_GOVERNOR = keccak256("GOVERNOR");
+    bytes32 public constant ROLE_RESOLVER = keccak256("RESOLVER");
+    bytes32 public constant ROLE_PAUSER   = keccak256("PAUSER");
 
-    bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
-    bytes32 public constant RESOLVER_ROLE = keccak256("RESOLVER_ROLE");
-    bytes32 public constant PAUSER_ROLE   = keccak256("PAUSER_ROLE");
+    mapping(bytes32 => mapping(address => bool)) public roles;
 
-    /*////////////////////////////////////////////////////////////////
-                              CUSTOM ERRORS
-    ////////////////////////////////////////////////////////////////*/
-
-    error Denied();
-    error ZeroAddress();
-    error BadFee();
-    error BadCID();
-    error BadKeyHash();
-    error NoCategory();
-    error NoReserve();
-    error BadDuration();
-    error HighRoyalty();
-    error NotFound();
-    error NotActive();
-    error AuctionEnded();
-    error InventorCannotBid();
-    error AuctionFull();
-    error DepositBelowReserve();
-    error BidExists();
-    error WalletIsFrozen();
-    error WrongWindow();
-    error InvalidBid();
-    error AmountBelowReserve();
-    error BadReveal();
-    error DepositTooLow();
-    error CannotSettle();
-    error RevealStillOpen();
-    error NotInventor();
-    error NotAwaitingKey();
-    error EmptyKey();
-    error PastDeadline();
-    error NotWinner();
-    error DeadlineNotPassed();
-    error NotSettledOwner();
-    error BadPrice();
-    error NotForSale();
-    error PaymentTooLow();
-    error NotParty();
-    error WrongStatus();
-    error AlreadyDisputed();
-    error NothingToWithdraw();
-    error TransferFailed();
-    error NothingToClaim();
-    error NotQueued();
-    error TimelockActive();
-    error NotInEmergency();
-    error NotFrozenListing();
-
-    /*////////////////////////////////////////////////////////////////
-                                 STORAGE
-    ////////////////////////////////////////////////////////////////*/
-
-    /// @dev status: 0=Active 1=Revealing 2=AwaitingKey 3=KeyDelivered
-    ///              4=Complete 5=Disputed 6=Cancelled/Refunded 7=Frozen
     struct Listing {
         address payable inventor;
         address  winner;
@@ -149,12 +65,12 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
         bool    active;
     }
 
-    struct PendingAdminChange {
-        uint256 newValue;
-        address newAddress;
-        uint256 executableAt;
-    }
+    mapping(uint256 => string) public listingCID;
+    mapping(uint256 => string) public listingKeyHash;
+    mapping(uint256 => string) public listingCategory;
+    mapping(uint256 => string) public listingEncryptedKey;
 
+    address public owner;
     address public platformWallet;
     address public governorContract;
     address public valuationContract;
@@ -163,21 +79,14 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     uint256 public totalVolumeWei;
     uint256 public totalListings;
     uint256 public totalBids;
+    bool    public paused;
     bool    public emergencyMode;
+    uint256 public constant EMERGENCY_DELAY = 48 hours;
     uint256 public emergencyDrainQueuedAt;
 
-    /// @notice Sum of all ETH the contract is obligated to pay out
-    ///         (active bid deposits + queued withdrawals).
-    uint256 public totalEscrowed;
-
-    PendingAdminChange public pendingFeeChange;
-    PendingAdminChange public pendingWalletChange;
+    uint256 private _status = 1;
 
     mapping(uint256 => Listing)                 public listings;
-    mapping(uint256 => string)                  public listingCID;
-    mapping(uint256 => string)                  public listingKeyHash;
-    mapping(uint256 => string)                  public listingCategory;
-    mapping(uint256 => string)                  private _listingEncryptedKey;
     mapping(uint256 => mapping(address => Bid)) public bids;
     mapping(uint256 => address[])               public bidders;
     mapping(uint256 => SecondaryListing)        public secondaryListings;
@@ -186,91 +95,43 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     mapping(address => uint256)                 public pendingWithdrawals;
     mapping(address => bool)                    public frozenWallets;
 
-    /*////////////////////////////////////////////////////////////////
-                                  EVENTS
-    ////////////////////////////////////////////////////////////////*/
-
     event Listed(uint256 indexed id, address indexed inventor, uint256 reserve, uint256 endTime);
     event BidCommitted(uint256 indexed id, address indexed bidder, bytes32 commitment);
     event BidRevealed(uint256 indexed id, address indexed bidder, uint256 amount);
     event Settled(uint256 indexed id, address indexed winner, uint256 amount);
     event Cancelled(uint256 indexed id);
     event KeyDelivered(uint256 indexed id, address indexed winner);
-    event FundsReleased(uint256 indexed id, uint256 inventorAmt, uint256 platformAmt);
+    event FundsReleased(uint256 indexed id, uint256 inventorAmt, uint256 platAmt);
     event RoyaltyPaid(uint256 indexed id, address indexed inventor, uint256 amount);
-    event SecondaryListed(uint256 indexed id, address indexed seller, uint256 price);
-    event SecondarySold(uint256 indexed id, address indexed buyer, uint256 price);
-    event DisputeRaised(uint256 indexed id, address indexed by);
+    event DisputeRaised(uint256 indexed id);
     event DisputeResolved(uint256 indexed id, bool inventorFavored);
     event RefundQueued(address indexed wallet, uint256 amount);
-    event BidRefundClaimed(uint256 indexed id, address indexed bidder, uint256 amount);
     event Withdrawn(address indexed wallet, uint256 amount);
-    event WalletFrozen(address indexed wallet, string reason);
+    event WalletFrozen(address indexed wallet);
     event WalletUnfrozen(address indexed wallet);
-    event ListingFrozen(uint256 indexed id);
-    event ListingUnfrozen(uint256 indexed id);
-    event EmergencyActivated(address indexed by);
-    event EmergencyDeactivated(address indexed by);
     event EmergencyDrainQueued(uint256 executableAt);
-    event EmergencyDrainCancelled();
-    event EmergencyDrained(address indexed to, uint256 amount);
-    event FeeChangeQueued(uint256 newFee, uint256 executableAt);
-    event FeeChanged(uint256 oldFee, uint256 newFee);
-    event WalletChangeQueued(address newWallet, uint256 executableAt);
-    event PlatformWalletChanged(address indexed oldWallet, address indexed newWallet);
-    event GovernorContractSet(address indexed governor);
-    event ValuationContractSet(address indexed valuation);
 
-    /*////////////////////////////////////////////////////////////////
-                                MODIFIERS
-    ////////////////////////////////////////////////////////////////*/
+    modifier role(bytes32 r)  { require(roles[r][msg.sender], "Denied"); _; }
+    modifier lock()           { require(_status == 1, "Reentrant"); _status = 2; _; _status = 1; }
+    modifier live()           { require(!paused, "Paused"); _; }
+    modifier notFrozen()      { require(!frozenWallets[msg.sender], "Frozen"); _; }
+    modifier has(uint256 id)  { require(id > 0 && id <= listingCount, "Not found"); _; }
 
-    modifier notFrozen() {
-        if (frozenWallets[msg.sender]) revert WalletIsFrozen();
-        _;
-    }
-
-    modifier exists(uint256 id) {
-        if (id == 0 || id > listingCount) revert NotFound();
-        _;
-    }
-
-    /*////////////////////////////////////////////////////////////////
-                               CONSTRUCTOR
-    ////////////////////////////////////////////////////////////////*/
-
-    /// @param admin    Initial admin — set this to the 2-of-2 Safe address
-    ///                 at deployment so the multisig controls everything
-    ///                 from block one.
-    /// @param _wallet  Platform fee recipient (also the Safe, typically)
-    /// @param _fee     Platform fee in basis points (1000–3000)
-    /// @dev AccessControlDefaultAdminRules enforces a 24h delay + two-step
-    ///      acceptance on any future admin (Safe) handover — the audited
-    ///      OpenZeppelin equivalent of Ownable2Step for role systems.
-    constructor(address admin, address _wallet, uint256 _fee)
-        AccessControlDefaultAdminRules(uint48(ADMIN_TIMELOCK), admin)
-    {
-        if (_wallet == address(0)) revert ZeroAddress();
-        if (_fee < MIN_FEE || _fee > MAX_FEE) revert BadFee();
+    constructor(address _wallet, uint256 _fee) {
+        require(_wallet != address(0), "Zero wallet");
+        require(_fee >= MIN_FEE && _fee <= MAX_FEE, "Bad fee");
+        owner          = msg.sender;
         platformWallet = _wallet;
         platformFeeBps = _fee;
-        _grantRole(GOVERNOR_ROLE, admin);
-        _grantRole(RESOLVER_ROLE, admin);
-        _grantRole(PAUSER_ROLE, admin);
+        roles[ROLE_OWNER][msg.sender]    = true;
+        roles[ROLE_GOVERNOR][msg.sender] = true;
+        roles[ROLE_RESOLVER][msg.sender] = true;
+        roles[ROLE_PAUSER][msg.sender]   = true;
     }
 
-    /*////////////////////////////////////////////////////////////////
-                                 LISTING
-    ////////////////////////////////////////////////////////////////*/
+    function grantRole(bytes32 r, address a) external role(ROLE_OWNER) { roles[r][a] = true; }
+    function revokeRole(bytes32 r, address a) external role(ROLE_OWNER) { roles[r][a] = false; }
 
-    /// @notice List an encrypted idea for sealed-bid auction.
-    /// @param cid        IPFS CID of the encrypted idea payload
-    /// @param keyHash    Hash of the decryption key (integrity check)
-    /// @param category   Idea category (used by valuation oracle)
-    /// @param reserve    Minimum acceptable bid in wei
-    /// @param duration   Auction length (1–7 days)
-    /// @param royaltyBps Secondary-sale royalty to inventor (max 10%)
-    /// @return id        The new listing's id
     function listIdea(
         string calldata cid,
         string calldata keyHash,
@@ -278,29 +139,29 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
         uint256 reserve,
         uint256 duration,
         uint256 royaltyBps
-    ) external whenNotPaused notFrozen returns (uint256 id) {
-        if (bytes(cid).length < 10)      revert BadCID();
-        if (bytes(keyHash).length < 32)  revert BadKeyHash();
-        if (bytes(category).length == 0) revert NoCategory();
-        if (reserve == 0)                revert NoReserve();
-        if (duration < MIN_DUR || duration > MAX_DUR) revert BadDuration();
-        if (royaltyBps > MAX_ROYALTY)    revert HighRoyalty();
+    ) external live notFrozen returns (uint256) {
+        require(bytes(cid).length >= 10,    "Bad CID");
+        require(bytes(keyHash).length >= 32,"Bad key hash");
+        require(bytes(category).length > 0, "No category");
+        require(reserve > 0,                "No reserve");
+        require(duration >= MIN_DUR && duration <= MAX_DUR, "Bad duration");
+        require(royaltyBps <= MAX_ROYALTY,  "High royalty");
 
         if (governorContract != address(0)) {
             (bool ok, string memory reason) = IGovernor(governorContract).canList(msg.sender);
             require(ok, reason);
         }
 
-        id = ++listingCount;
-        uint64 end = uint64(block.timestamp + duration);
+        listingCount++;
+        uint256 id = listingCount;
+        uint64  end = uint64(block.timestamp + duration);
 
-        Listing storage l = listings[id];
-        l.inventor       = payable(msg.sender);
-        l.reservePrice   = uint128(reserve);
-        l.endTime        = end;
-        l.revealDeadline = end + uint64(REVEAL_WIN);
-        l.keyDeadline    = end + uint64(REVEAL_WIN + KEY_WIN);
-        l.royaltyBps     = uint16(royaltyBps);
+        listings[id].inventor      = payable(msg.sender);
+        listings[id].reservePrice  = uint128(reserve);
+        listings[id].endTime       = end;
+        listings[id].revealDeadline = uint64(end + REVEAL_WIN);
+        listings[id].keyDeadline   = uint64(end + REVEAL_WIN + KEY_WIN);
+        listings[id].royaltyBps    = uint16(royaltyBps);
 
         listingCID[id]      = cid;
         listingKeyHash[id]  = keyHash;
@@ -309,457 +170,231 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
         inventorListings[msg.sender].push(id);
         totalListings++;
 
-        if (governorContract != address(0)) {
-            IGovernor(governorContract).onListingCreated(id, msg.sender);
-        }
+        if (governorContract != address(0)) IGovernor(governorContract).onListingCreated(id, msg.sender);
         emit Listed(id, msg.sender, reserve, end);
+        return id;
     }
 
-    /*////////////////////////////////////////////////////////////////
-                                 BIDDING
-    ////////////////////////////////////////////////////////////////*/
-
-    /// @notice Commit a sealed bid backed by a deposit. Deposit must be
-    ///         >= your actual bid (over-deposit to obscure it; surplus
-    ///         is refunded after settlement).
-    /// @dev commitment = keccak256(abi.encodePacked(amount, salt, msg.sender, id))
-    function commitBid(uint256 id, bytes32 commitment)
-        external payable whenNotPaused notFrozen exists(id) nonReentrant
-    {
+    function commitBid(uint256 id, bytes32 commitment) external payable live notFrozen has(id) lock {
         Listing storage l = listings[id];
-        if (l.status != 0)                 revert NotActive();
-        if (block.timestamp >= l.endTime)  revert AuctionEnded();
-        if (msg.sender == l.inventor)      revert InventorCannotBid();
-        if (l.bidCount >= MAX_BIDDERS)     revert AuctionFull();
-        if (msg.value < l.reservePrice)    revert DepositBelowReserve();
-        if (bids[id][msg.sender].commitment != bytes32(0)) revert BidExists();
+        require(l.status == 0,               "Not active");
+        require(block.timestamp < l.endTime, "Ended");
+        require(msg.sender != l.inventor,    "Inventor");
+        require(l.bidCount < 1000,           "Full");
+        require(msg.value >= l.reservePrice, "Low bid");
+        require(bids[id][msg.sender].commitment == 0, "Bid exists");
 
         if (governorContract != address(0)) {
             (bool ok, string memory reason) = IGovernor(governorContract).canBid(msg.sender);
             require(ok, reason);
         }
 
-        bids[id][msg.sender] = Bid({
-            commitment:     commitment,
-            revealedAmount: 0,
-            depositAmount:  msg.value,
-            revealed:       false,
-            refunded:       false,
-            isWinner:       false
-        });
+        bids[id][msg.sender] = Bid(commitment, 0, msg.value, false, false, false);
         bidders[id].push(msg.sender);
         l.bidCount++;
         totalBids++;
-        totalEscrowed += msg.value;
         bidderHistory[msg.sender].push(id);
 
-        if (governorContract != address(0)) {
-            IGovernor(governorContract).onBidCommitted(id, msg.sender);
-        }
+        if (governorContract != address(0)) IGovernor(governorContract).onBidCommitted(id, msg.sender);
         emit BidCommitted(id, msg.sender, commitment);
     }
 
-    /// @notice Reveal a committed bid during the reveal window.
-    /// @dev SECURITY FIX (v2.0): revealed amount must be fully covered
-    ///      by the deposit, so the contract always holds the winning bid
-    ///      in full. Winner is tracked incrementally here, making
-    ///      settlement O(1) and immune to bidder-count gas limits.
-    function revealBid(uint256 id, uint256 amount, bytes32 salt)
-        external whenNotPaused exists(id)
-    {
+    function revealBid(uint256 id, uint256 amount, bytes32 salt) external live has(id) {
         Listing storage l = listings[id];
-        if (block.timestamp < l.endTime || block.timestamp > l.revealDeadline) revert WrongWindow();
+        require(block.timestamp >= l.endTime && block.timestamp <= l.revealDeadline, "Wrong window");
         Bid storage b = bids[id][msg.sender];
-        if (b.commitment == bytes32(0) || b.revealed) revert InvalidBid();
-        if (amount < l.reservePrice) revert AmountBelowReserve();
-        if (keccak256(abi.encodePacked(amount, salt, msg.sender, id)) != b.commitment) revert BadReveal();
-        if (b.depositAmount < amount) revert DepositTooLow();
-
+        require(b.commitment != 0 && !b.revealed, "Invalid");
+        require(amount >= l.reservePrice, "Low amount");
+        require(keccak256(abi.encodePacked(amount, salt, msg.sender, id)) == b.commitment, "Bad reveal");
         b.revealed       = true;
         b.revealedAmount = amount;
         if (l.status == 0) l.status = 1;
-
-        // Incremental winner tracking — no settlement loop needed.
-        if (amount > l.winningBid) {
-            l.winningBid = uint128(amount);
-            l.winner     = msg.sender;
-        }
+        if (amount > l.winningBid) l.winningBid = uint128(amount);
         emit BidRevealed(id, msg.sender, amount);
     }
 
-    /// @notice Finalize the auction after the reveal window closes.
-    /// @dev O(1): winner was tracked at reveal time. Losers and
-    ///      non-revealers claim deposits via claimBidRefund().
-    function settleAuction(uint256 id) external exists(id) nonReentrant {
+    function settleAuction(uint256 id) external has(id) lock {
         Listing storage l = listings[id];
-        if (l.status > 1)                        revert CannotSettle();
-        if (block.timestamp <= l.revealDeadline) revert RevealStillOpen();
+        require(l.status <= 1, "Cannot settle");
+        require(block.timestamp > l.revealDeadline, "Reveal open");
 
-        address winner = l.winner;
-        uint256 winBid = l.winningBid;
+        address winner = _findWinner(id);
+        uint256 winBid = winner != address(0) ? bids[id][winner].revealedAmount : 0;
 
         if (winner == address(0) || winBid < l.reservePrice) {
             l.status = 6;
+            _refundAll(id);
             emit Cancelled(id);
-            return; // all bidders reclaim via claimBidRefund()
+            return;
         }
 
-        l.status = 2;
-        Bid storage wb = bids[id][winner];
-        wb.isWinner = true;
-
-        // Refund the winner's surplus deposit (deposit − bid).
-        uint256 surplus = wb.depositAmount - winBid;
-        if (surplus > 0) {
-            wb.depositAmount = winBid;
-            pendingWithdrawals[winner] += surplus;
-            emit RefundQueued(winner, surplus);
-        }
-
+        l.winner   = winner;
+        l.winningBid = uint128(winBid);
+        l.status   = 2;
+        bids[id][winner].isWinner = true;
+        _refundLosers(id, winner);
         totalVolumeWei += winBid;
 
-        if (governorContract != address(0)) {
-            IGovernor(governorContract).onAuctionSettled(id, winner, winBid);
-        }
+        if (governorContract != address(0)) IGovernor(governorContract).onAuctionSettled(id, winner, winBid);
         emit Settled(id, winner, winBid);
     }
 
-    /// @notice Claim back your bid deposit after settlement or
-    ///         cancellation (losing bidders and non-revealers).
-    /// @dev Pull-pattern replacement for v1's refund loops — removes the
-    ///      unbounded-gas settlement risk entirely.
-    function claimBidRefund(uint256 id) external exists(id) nonReentrant {
-        Listing storage l = listings[id];
-        if (l.status < 2) revert CannotSettle();
-        Bid storage b = bids[id][msg.sender];
-        if (b.commitment == bytes32(0) || b.refunded || b.isWinner) revert NothingToClaim();
-
-        b.refunded = true;
-        uint256 amt = b.depositAmount;
-        pendingWithdrawals[msg.sender] += amt;
-        emit BidRefundClaimed(id, msg.sender, amt);
+    function _findWinner(uint256 id) internal view returns (address w) {
+        address[] storage list = bidders[id];
+        uint256 top;
+        for (uint256 i = 0; i < list.length; i++) {
+            Bid storage b = bids[id][list[i]];
+            if (b.revealed && b.revealedAmount > top) {
+                top = b.revealedAmount;
+                w   = list[i];
+            }
+        }
     }
 
-    /*////////////////////////////////////////////////////////////////
-                          KEY DELIVERY & FUNDS
-    ////////////////////////////////////////////////////////////////*/
-
-    /// @notice Inventor delivers the encrypted decryption key to the
-    ///         winner, releasing escrowed funds (80/20 split).
-    function deliverKey(uint256 id, string calldata encKey)
-        external whenNotPaused exists(id) nonReentrant
-    {
+    function deliverKey(uint256 id, string calldata encKey) external live has(id) lock {
         Listing storage l = listings[id];
-        if (msg.sender != l.inventor)        revert NotInventor();
-        if (l.status != 2)                   revert NotAwaitingKey();
-        if (bytes(encKey).length == 0)       revert EmptyKey();
-        if (block.timestamp > l.keyDeadline) revert PastDeadline();
+        require(msg.sender == l.inventor,    "Not inventor");
+        require(l.status == 2,               "Not awaiting");
+        require(bytes(encKey).length > 0,    "Empty key");
+        require(!l.keyDelivered,             "Delivered");
+        require(block.timestamp <= l.keyDeadline, "Late");
 
-        _listingEncryptedKey[id] = encKey;
+        listingEncryptedKey[id] = encKey;
         l.keyDelivered = true;
         l.status       = 3;
         emit KeyDelivered(id, l.winner);
         _releaseFunds(id);
     }
 
-    /// @dev Pull-pattern release: amounts are queued to
-    ///      pendingWithdrawals, so a reverting recipient can never
-    ///      block settlement.
     function _releaseFunds(uint256 id) internal {
         Listing storage l = listings[id];
-        if (l.fundsReleased || l.disputed) return;
-        uint256 total = l.winningBid;
-        uint256 plat  = (total * platformFeeBps) / BPS;
-        uint256 inv   = total - plat;
+        require(!l.fundsReleased && !l.disputed);
+        uint256 total   = l.winningBid;
+        uint256 plat    = (total * platformFeeBps) / BPS;
+        uint256 inv     = total - plat;
         l.fundsReleased = true;
         l.status        = 4;
-
-        // Winning-deposit obligation converts into withdrawal
-        // obligations (−total +inv +plat = 0) → totalEscrowed unchanged.
-        pendingWithdrawals[l.inventor]     += inv;
-        pendingWithdrawals[platformWallet] += plat;
-
-        if (valuationContract != address(0)) {
-            try IValuation(valuationContract).recordSale(listingCategory[id], total) {} catch {}
-        }
+        if (valuationContract != address(0)) IValuation(valuationContract).recordSale(listingCategory[id], total);
+        (bool a,) = l.inventor.call{value: inv}(""); require(a, "Inventor transfer failed");
+        (bool b,) = payable(platformWallet).call{value: plat}(""); require(b, "Platform transfer failed");
         emit FundsReleased(id, inv, plat);
     }
 
-    /// @notice Winner reclaims escrow if the inventor missed the key
-    ///         deadline.
-    function claimRefund(uint256 id) external exists(id) nonReentrant {
+    function claimRefund(uint256 id) external has(id) lock {
         Listing storage l = listings[id];
-        if (msg.sender != l.winner || l.status != 2) revert NotWinner();
-        if (block.timestamp <= l.keyDeadline)        revert DeadlineNotPassed();
+        require(msg.sender == l.winner && l.status == 2);
+        require(block.timestamp > l.keyDeadline);
         l.status = 6;
         pendingWithdrawals[msg.sender] += l.winningBid;
         emit RefundQueued(msg.sender, l.winningBid);
     }
 
-    /// @notice Withdraw everything owed to you (refunds, proceeds,
-    ///         platform fees, royalties).
-    function withdraw() external nonReentrant {
-        uint256 amt = pendingWithdrawals[msg.sender];
-        if (amt == 0) revert NothingToWithdraw();
-        pendingWithdrawals[msg.sender] = 0;
-        totalEscrowed -= amt;
-        (bool ok,) = payable(msg.sender).call{value: amt}("");
-        if (!ok) revert TransferFailed();
-        emit Withdrawn(msg.sender, amt);
-    }
-
-    /*////////////////////////////////////////////////////////////////
-                            SECONDARY MARKET
-    ////////////////////////////////////////////////////////////////*/
-
-    /// @notice Winner of a completed auction lists the idea for resale.
-    function listSecondary(uint256 id, uint256 price) external exists(id) {
+    function listSecondary(uint256 id, uint256 price) external has(id) {
         Listing storage l = listings[id];
-        if (l.status != 4 || msg.sender != l.winner) revert NotSettledOwner();
-        if (price == 0) revert BadPrice();
+        require(l.status == 4 && msg.sender == l.winner && price > 0);
         secondaryListings[id] = SecondaryListing(payable(msg.sender), price, true);
-        emit SecondaryListed(id, msg.sender, price);
     }
 
-    /// @notice Buy a secondary-market listing. Royalty and platform fee
-    ///         are deducted; all payouts are pull-pattern.
-    function buySecondary(uint256 id)
-        external payable whenNotPaused notFrozen exists(id) nonReentrant
-    {
+    function buySecondary(uint256 id) external payable has(id) lock {
         SecondaryListing storage sl = secondaryListings[id];
-        if (!sl.active)           revert NotForSale();
-        if (msg.value < sl.price) revert PaymentTooLow();
+        require(sl.active && msg.value >= sl.price);
         Listing storage l = listings[id];
-
         uint256 roy  = (msg.value * l.royaltyBps) / BPS;
         uint256 plat = (msg.value * platformFeeBps) / BPS;
         uint256 sell = msg.value - roy - plat;
-
         sl.active = false;
         l.winner  = msg.sender;
         totalVolumeWei += msg.value;
-        totalEscrowed  += msg.value;
-
-        if (roy > 0) {
-            pendingWithdrawals[l.inventor] += roy;
-            emit RoyaltyPaid(id, l.inventor, roy);
-        }
-        pendingWithdrawals[sl.seller]      += sell;
-        pendingWithdrawals[platformWallet] += plat;
-
-        if (valuationContract != address(0)) {
-            try IValuation(valuationContract).recordSale(listingCategory[id], msg.value) {} catch {}
-        }
-        emit SecondarySold(id, msg.sender, msg.value);
+        if (roy > 0) { (bool a,) = l.inventor.call{value: roy}(""); require(a, "Royalty transfer failed"); emit RoyaltyPaid(id, l.inventor, roy); }
+        (bool b,) = sl.seller.call{value: sell}(""); require(b, "Seller transfer failed");
+        (bool c,) = payable(platformWallet).call{value: plat}(""); require(c, "Platform transfer failed");
+        if (valuationContract != address(0)) IValuation(valuationContract).recordSale(listingCategory[id], msg.value);
     }
 
-    /*////////////////////////////////////////////////////////////////
-                                DISPUTES
-    ////////////////////////////////////////////////////////////////*/
-
-    function raiseDispute(uint256 id) external exists(id) {
+    function raiseDispute(uint256 id) external has(id) {
         Listing storage l = listings[id];
-        if (msg.sender != l.winner && msg.sender != l.inventor) revert NotParty();
-        if (l.status != 2 && l.status != 3) revert WrongStatus();
-        if (l.disputed) revert AlreadyDisputed();
+        require(msg.sender == l.winner || msg.sender == l.inventor);
+        require(l.status == 2 || l.status == 3);
+        require(!l.disputed);
         l.disputed = true;
         l.status   = 5;
-        if (governorContract != address(0)) {
-            IGovernor(governorContract).onDisputeRaised(msg.sender);
-        }
-        emit DisputeRaised(id, msg.sender);
+        if (governorContract != address(0)) IGovernor(governorContract).onDisputeRaised(msg.sender);
+        emit DisputeRaised(id);
     }
 
-    function resolveDispute(uint256 id, bool inventorFavored)
-        external onlyRole(RESOLVER_ROLE) exists(id) nonReentrant
-    {
+    function resolveDispute(uint256 id, bool inv) external role(ROLE_RESOLVER) has(id) lock {
         Listing storage l = listings[id];
-        if (l.status != 5) revert WrongStatus();
-        if (inventorFavored) {
-            l.keyDelivered = true;
-            l.disputed = false;
-            _releaseFunds(id);
-        } else {
-            l.status = 6;
-            pendingWithdrawals[l.winner] += l.winningBid;
-            emit RefundQueued(l.winner, l.winningBid);
-        }
+        require(l.status == 5);
+        if (inv) { l.keyDelivered = true; l.disputed = false; _releaseFunds(id); }
+        else { l.status = 6; pendingWithdrawals[l.winner] += l.winningBid; emit RefundQueued(l.winner, l.winningBid); }
         if (governorContract != address(0)) {
-            IGovernor(governorContract).onDisputeResolved(l.inventor, inventorFavored);
-            IGovernor(governorContract).onDisputeResolved(l.winner, !inventorFavored);
+            IGovernor(governorContract).onDisputeResolved(l.inventor, inv);
+            IGovernor(governorContract).onDisputeResolved(l.winner, !inv);
         }
-        emit DisputeResolved(id, inventorFavored);
+        emit DisputeResolved(id, inv);
     }
 
-    /*////////////////////////////////////////////////////////////////
-                           GOVERNANCE / ADMIN
-    ////////////////////////////////////////////////////////////////*/
-
-    function freezeWallet(address w, string calldata reason) external onlyRole(GOVERNOR_ROLE) {
-        if (w == address(0)) revert ZeroAddress();
-        frozenWallets[w] = true;
-        emit WalletFrozen(w, reason);
+    function withdraw() external lock {
+        uint256 amt = pendingWithdrawals[msg.sender];
+        require(amt > 0);
+        pendingWithdrawals[msg.sender] = 0;
+        (bool ok,) = payable(msg.sender).call{value: amt}("");
+        require(ok, "Withdraw failed");
+        emit Withdrawn(msg.sender, amt);
     }
 
-    function unfreezeWallet(address w) external onlyRole(GOVERNOR_ROLE) {
-        frozenWallets[w] = false;
-        emit WalletUnfrozen(w);
+    function _refundAll(uint256 id) internal {
+        address[] storage list = bidders[id];
+        for (uint256 i = 0; i < list.length; i++) {
+            Bid storage b = bids[id][list[i]];
+            if (!b.refunded) { b.refunded = true; pendingWithdrawals[list[i]] += b.depositAmount; emit RefundQueued(list[i], b.depositAmount); }
+        }
     }
 
-    function freezeListing(uint256 id) external onlyRole(GOVERNOR_ROLE) exists(id) {
-        listings[id].status = 7;
-        emit ListingFrozen(id);
+    function _refundLosers(uint256 id, address winner) internal {
+        address[] storage list = bidders[id];
+        for (uint256 i = 0; i < list.length; i++) {
+            if (list[i] == winner) continue;
+            Bid storage b = bids[id][list[i]];
+            if (!b.refunded) { b.refunded = true; pendingWithdrawals[list[i]] += b.depositAmount; emit RefundQueued(list[i], b.depositAmount); }
+        }
     }
 
-    function unfreezeListing(uint256 id) external onlyRole(GOVERNOR_ROLE) exists(id) {
-        if (listings[id].status != 7) revert NotFrozenListing();
-        listings[id].status = 0;
-        emit ListingUnfrozen(id);
+    function freezeWallet(address w, string calldata) external role(ROLE_GOVERNOR) { require(w != address(0), "Zero"); frozenWallets[w] = true; emit WalletFrozen(w); }
+    function unfreezeWallet(address w) external role(ROLE_GOVERNOR) { require(w != address(0), "Zero"); frozenWallets[w] = false; emit WalletUnfrozen(w); }
+    function freezeListing(uint256 id) external role(ROLE_GOVERNOR) has(id) { listings[id].status = 7; }
+    function unfreezeListing(uint256 id) external role(ROLE_GOVERNOR) has(id) { require(listings[id].status == 7, "Not frozen"); listings[id].status = 0; }
+    function pause() external role(ROLE_PAUSER) { paused = true; }
+    function unpause() external role(ROLE_OWNER) { paused = false; }
+    function activateEmergency() external role(ROLE_OWNER) { emergencyMode = true; paused = true; }
+    function deactivateEmergency() external role(ROLE_OWNER) { emergencyMode = false; paused = false; }
+
+    function getListing(uint256 id) external view returns (Listing memory) { return listings[id]; }
+    function getListingStrings(uint256 id) external view returns (string memory, string memory, string memory) { return (listingCID[id], listingKeyHash[id], listingCategory[id]); }
+    function getBidders(uint256 id) external view returns (address[] memory) { return bidders[id]; }
+    function getBid(uint256 id, address bidder) external view returns (Bid memory) { return bids[id][bidder]; }
+    function getWinnerKey(uint256 id) external view returns (string memory) { require(msg.sender == listings[id].winner && listings[id].keyDelivered, "Not allowed"); return listingEncryptedKey[id]; }
+    function getInventorListings(address a) external view returns (uint256[] memory) { return inventorListings[a]; }
+    function getBidderHistory(address a) external view returns (uint256[] memory) { return bidderHistory[a]; }
+    function getPlatformStats() external view returns (uint256, uint256, uint256, bool) { return (totalListings, totalVolumeWei, totalBids, paused); }
+
+    function setGovernorContract(address g) external role(ROLE_OWNER) { require(g != address(0), "Zero"); governorContract = g; }
+    function setValuationContract(address v) external role(ROLE_OWNER) { require(v != address(0), "Zero"); valuationContract = v; }
+    function updatePlatformWallet(address w) external role(ROLE_OWNER) { require(w != address(0), "Zero"); platformWallet = w; }
+    function updatePlatformFee(uint256 f) external role(ROLE_OWNER) { require(f >= MIN_FEE && f <= MAX_FEE, "Bad fee"); platformFeeBps = f; }
+    function emergencyDrain(address to) external role(ROLE_OWNER) {
+        require(emergencyMode && to != address(0), "Not allowed");
+        require(emergencyDrainQueuedAt != 0, "Not queued");
+        require(block.timestamp >= emergencyDrainQueuedAt + EMERGENCY_DELAY, "Timelock active");
+        emergencyDrainQueuedAt = 0;
+        (bool ok,) = payable(to).call{value: address(this).balance}(""); require(ok, "Drain failed");
     }
-
-    function pause() external onlyRole(PAUSER_ROLE) { _pause(); }
-
-    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) { _unpause(); }
-
-    function activateEmergency() external onlyRole(DEFAULT_ADMIN_ROLE) {
-        emergencyMode = true;
-        _pause();
-        emit EmergencyActivated(msg.sender);
-    }
-
-    function deactivateEmergency() external onlyRole(DEFAULT_ADMIN_ROLE) {
-        emergencyMode = false;
-        _unpause();
-        emit EmergencyDeactivated(msg.sender);
-    }
-
-    /*////////////////////////////////////////////////////////////////
-                   TIMELOCKED ADMIN PARAMETER CHANGES
-    ////////////////////////////////////////////////////////////////*/
-
-    /// @notice Queue a platform fee change (24h timelock).
-    function queueFeeChange(uint256 f) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (f < MIN_FEE || f > MAX_FEE) revert BadFee();
-        uint256 at = block.timestamp + ADMIN_TIMELOCK;
-        pendingFeeChange = PendingAdminChange(f, address(0), at);
-        emit FeeChangeQueued(f, at);
-    }
-
-    function executeFeeChange() external onlyRole(DEFAULT_ADMIN_ROLE) {
-        PendingAdminChange memory p = pendingFeeChange;
-        if (p.executableAt == 0)              revert NotQueued();
-        if (block.timestamp < p.executableAt) revert TimelockActive();
-        uint256 old = platformFeeBps;
-        platformFeeBps = p.newValue;
-        delete pendingFeeChange;
-        emit FeeChanged(old, p.newValue);
-    }
-
-    /// @notice Queue a platform-wallet change (24h timelock).
-    function queueWalletChange(address w) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (w == address(0)) revert ZeroAddress();
-        uint256 at = block.timestamp + ADMIN_TIMELOCK;
-        pendingWalletChange = PendingAdminChange(0, w, at);
-        emit WalletChangeQueued(w, at);
-    }
-
-    function executeWalletChange() external onlyRole(DEFAULT_ADMIN_ROLE) {
-        PendingAdminChange memory p = pendingWalletChange;
-        if (p.executableAt == 0)              revert NotQueued();
-        if (block.timestamp < p.executableAt) revert TimelockActive();
-        address old = platformWallet;
-        platformWallet = p.newAddress;
-        delete pendingWalletChange;
-        emit PlatformWalletChanged(old, p.newAddress);
-    }
-
-    function setGovernorContract(address g) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (g == address(0)) revert ZeroAddress();
-        governorContract = g;
-        emit GovernorContractSet(g);
-    }
-
-    function setValuationContract(address v) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (v == address(0)) revert ZeroAddress();
-        valuationContract = v;
-        emit ValuationContractSet(v);
-    }
-
-    /*////////////////////////////////////////////////////////////////
-                     EMERGENCY DRAIN (TIMELOCKED)
-    ////////////////////////////////////////////////////////////////*/
-
-    function queueEmergencyDrain() external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (!emergencyMode) revert NotInEmergency();
+    function queueEmergencyDrain() external role(ROLE_OWNER) {
+        require(emergencyMode, "Not in emergency mode");
         emergencyDrainQueuedAt = block.timestamp;
         emit EmergencyDrainQueued(block.timestamp + EMERGENCY_DELAY);
     }
-
-    function cancelEmergencyDrain() external onlyRole(DEFAULT_ADMIN_ROLE) {
-        emergencyDrainQueuedAt = 0;
-        emit EmergencyDrainCancelled();
-    }
-
-    function emergencyDrain(address to) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (!emergencyMode) revert NotInEmergency();
-        if (to == address(0)) revert ZeroAddress();
-        if (emergencyDrainQueuedAt == 0) revert NotQueued();
-        if (block.timestamp < emergencyDrainQueuedAt + EMERGENCY_DELAY) revert TimelockActive();
-        emergencyDrainQueuedAt = 0;
-        uint256 bal = address(this).balance;
-        (bool ok,) = payable(to).call{value: bal}("");
-        if (!ok) revert TransferFailed();
-        emit EmergencyDrained(to, bal);
-    }
-
-    /*////////////////////////////////////////////////////////////////
-                             VIEW FUNCTIONS
-    ////////////////////////////////////////////////////////////////*/
-
-    /// @notice Public solvency invariant: the contract must always hold
-    ///         at least its total outstanding obligations.
-    function isSolvent() external view returns (bool) {
-        return address(this).balance >= totalEscrowed;
-    }
-
-    function getListing(uint256 id) external view returns (Listing memory) {
-        return listings[id];
-    }
-
-    function getListingStrings(uint256 id)
-        external view returns (string memory cid, string memory keyHash, string memory category)
-    {
-        return (listingCID[id], listingKeyHash[id], listingCategory[id]);
-    }
-
-    function getBidders(uint256 id) external view returns (address[] memory) {
-        return bidders[id];
-    }
-
-    function getBid(uint256 id, address bidder) external view returns (Bid memory) {
-        return bids[id][bidder];
-    }
-
-    /// @notice Only the auction winner can read the delivered key.
-    function getWinnerKey(uint256 id) external view returns (string memory) {
-        Listing storage l = listings[id];
-        if (msg.sender != l.winner || !l.keyDelivered) revert Denied();
-        return _listingEncryptedKey[id];
-    }
-
-    function getInventorListings(address a) external view returns (uint256[] memory) {
-        return inventorListings[a];
-    }
-
-    function getBidderHistory(address a) external view returns (uint256[] memory) {
-        return bidderHistory[a];
-    }
-
-    function getPlatformStats()
-        external view returns (uint256 listed, uint256 volume, uint256 bidCount, bool isPaused)
-    {
-        return (totalListings, totalVolumeWei, totalBids, paused());
-    }
+    function cancelEmergencyDrain() external role(ROLE_OWNER) { emergencyDrainQueuedAt = 0; }
 
     receive() external payable {}
 }

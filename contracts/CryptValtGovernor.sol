@@ -1,47 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/*//////////////////////////////////////////////////////////////////////////
-                        CRYPTVALT GOVERNOR v2.0
-             Reputation & Anti-Fraud Engine — OZ Edition
-//////////////////////////////////////////////////////////////////////////*/
+contract CryptValtGovernor {
 
-import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step.sol";
-
-/// @title CryptValt Governor
-/// @author CryptValt
-/// @notice On-chain reputation and anti-fraud engine for the CryptValt
-///         marketplace: tracks wallet reputation, flags abusive
-///         patterns (listing spam, bid velocity), and gates
-///         bidding/listing eligibility.
-/// @dev v2.0 modernization on OpenZeppelin Ownable2Step (Safe-ready,
-///      two-step transfer). Logic unchanged from v1 (audit found no
-///      fund-safety issues — this contract holds no funds); adds custom
-///      errors and complete event coverage.
-contract CryptValtGovernor is Ownable2Step {
-
-    /*////////////////////////////////////////////////////////////////
-                                CONSTANTS
-    ////////////////////////////////////////////////////////////////*/
+    address public owner;
+    address public platform;
+    bool    public active = true;
 
     uint256 public constant INITIAL_REP   = 500;
     uint256 public constant MAX_REP       = 1000;
     uint256 public constant FREEZE_THRESH = 50;
-
-    /*////////////////////////////////////////////////////////////////
-                              CUSTOM ERRORS
-    ////////////////////////////////////////////////////////////////*/
-
-    error ZeroAddress();
-    error NotPlatform();
-    error Inactive();
-
-    /*////////////////////////////////////////////////////////////////
-                                 STORAGE
-    ////////////////////////////////////////////////////////////////*/
-
-    address public platform;
-    bool    public active = true;
 
     uint256 public minRepToBid  = 100;
     uint256 public minRepToList = 150;
@@ -63,48 +31,24 @@ contract CryptValtGovernor is Ownable2Step {
     mapping(address => bool)    public verified;
     mapping(address => bool)    public frozen;
 
-    /*////////////////////////////////////////////////////////////////
-                                  EVENTS
-    ////////////////////////////////////////////////////////////////*/
-
     event ReputationChanged(address indexed wallet, uint256 oldRep, uint256 newRep);
     event FraudFlagged(address indexed wallet, uint256 listingId, string reason);
     event AutoFrozen(address indexed wallet, string reason);
-    event ManualUnfrozen(address indexed wallet);
     event WalletVerified(address indexed wallet);
     event ParamUpdated(string param, uint256 value);
     event PlatformUpdated(address indexed newPlatform);
     event ActiveToggled(bool indexed newState);
+    event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
 
-    /*////////////////////////////////////////////////////////////////
-                                MODIFIERS
-    ////////////////////////////////////////////////////////////////*/
+    modifier onlyOwner()    { require(msg.sender == owner, "Not owner");    _; }
+    modifier onlyPlatform() { require(msg.sender == platform || msg.sender == owner, "Not platform"); _; }
+    modifier isActive()     { require(active, "Inactive"); _; }
 
-    modifier onlyPlatform() {
-        if (msg.sender != platform && msg.sender != owner()) revert NotPlatform();
-        _;
-    }
-
-    modifier isActive() {
-        if (!active) revert Inactive();
-        _;
-    }
-
-    /*////////////////////////////////////////////////////////////////
-                               CONSTRUCTOR
-    ////////////////////////////////////////////////////////////////*/
-
-    /// @param initialOwner Deployer/admin — transfer to the Safe via
-    ///                     transferOwnership + acceptOwnership.
-    /// @param _platform    The CryptValt core contract address.
-    constructor(address initialOwner, address _platform) Ownable(initialOwner) {
-        if (_platform == address(0)) revert ZeroAddress();
+    constructor(address _platform) {
+        require(_platform != address(0), "Zero platform");
+        owner    = msg.sender;
         platform = _platform;
     }
-
-    /*////////////////////////////////////////////////////////////////
-                            INTERNAL HELPERS
-    ////////////////////////////////////////////////////////////////*/
 
     function _init(address w) internal {
         if (firstSeen[w] == 0) {
@@ -134,10 +78,6 @@ contract CryptValtGovernor is Ownable2Step {
         totalFreezes++;
         emit AutoFrozen(w, reason);
     }
-
-    /*////////////////////////////////////////////////////////////////
-                          PLATFORM CALLBACKS
-    ////////////////////////////////////////////////////////////////*/
 
     function onListingCreated(uint256, address inventor) external onlyPlatform isActive {
         _init(inventor);
@@ -192,29 +132,21 @@ contract CryptValtGovernor is Ownable2Step {
         }
     }
 
-    /*////////////////////////////////////////////////////////////////
-                          ELIGIBILITY CHECKS
-    ////////////////////////////////////////////////////////////////*/
-
     function canBid(address wallet) external view returns (bool, string memory) {
-        if (!active)                return (true,  "");
-        if (frozen[wallet])         return (false, "Wallet frozen");
-        if (firstSeen[wallet] == 0) return (true,  "");
+        if (!active)          return (true,  "");
+        if (frozen[wallet])   return (false, "Wallet frozen");
+        if (firstSeen[wallet] == 0) return (true, "");
         if (reputation[wallet] < minRepToBid) return (false, "Reputation too low");
         return (true, "");
     }
 
     function canList(address wallet) external view returns (bool, string memory) {
-        if (!active)                return (true,  "");
-        if (frozen[wallet])         return (false, "Wallet frozen");
-        if (firstSeen[wallet] == 0) return (true,  "");
+        if (!active)          return (true,  "");
+        if (frozen[wallet])   return (false, "Wallet frozen");
+        if (firstSeen[wallet] == 0) return (true, "");
         if (reputation[wallet] < minRepToList) return (false, "Reputation too low");
         return (true, "");
     }
-
-    /*////////////////////////////////////////////////////////////////
-                             VIEW FUNCTIONS
-    ////////////////////////////////////////////////////////////////*/
 
     function getReputation(address wallet) external view returns (uint256) {
         return firstSeen[wallet] == 0 ? INITIAL_REP : reputation[wallet];
@@ -234,12 +166,8 @@ contract CryptValtGovernor is Ownable2Step {
         return (totalFlags, totalFreezes, active);
     }
 
-    /*////////////////////////////////////////////////////////////////
-                                  ADMIN
-    ////////////////////////////////////////////////////////////////*/
-
     function verifyWallet(address wallet) external onlyOwner {
-        if (wallet == address(0)) revert ZeroAddress();
+        require(wallet != address(0), "Zero address");
         _init(wallet);
         verified[wallet] = true;
         _addRep(wallet, 150);
@@ -247,14 +175,14 @@ contract CryptValtGovernor is Ownable2Step {
     }
 
     function manualFreeze(address wallet) external onlyOwner {
-        if (wallet == address(0)) revert ZeroAddress();
+        require(wallet != address(0), "Zero address");
         _init(wallet);
         _freeze(wallet, "Manual freeze by admin");
     }
 
     function manualUnfreeze(address wallet) external onlyOwner {
+        require(wallet != address(0), "Zero address");
         frozen[wallet] = false;
-        emit ManualUnfrozen(wallet);
     }
 
     function setMinRepToBid(uint256 val) external onlyOwner {
@@ -278,8 +206,14 @@ contract CryptValtGovernor is Ownable2Step {
     }
 
     function updatePlatform(address p) external onlyOwner {
-        if (p == address(0)) revert ZeroAddress();
+        require(p != address(0), "Zero address");
         platform = p;
         emit PlatformUpdated(p);
+    }
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Zero address");
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
     }
 }
