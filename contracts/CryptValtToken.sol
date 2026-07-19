@@ -64,7 +64,7 @@ contract CryptValtToken is ERC20, ERC20Permit, ERC20Burnable, Ownable2Step, Paus
 
     address public treasury;
     address public cryptvalt;
-    uint256 public deployedAt;
+    uint256 public immutable deployedAt;
 
     // ── Staking ──
     uint256 public totalStaked;

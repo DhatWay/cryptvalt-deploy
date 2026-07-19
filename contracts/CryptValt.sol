@@ -216,7 +216,7 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     event EmergencyDrained(address indexed to, uint256 amount);
     event FeeChangeQueued(uint256 newFee, uint256 executableAt);
     event FeeChanged(uint256 oldFee, uint256 newFee);
-    event WalletChangeQueued(address newWallet, uint256 executableAt);
+    event WalletChangeQueued(address indexed newWallet, uint256 executableAt);
     event PlatformWalletChanged(address indexed oldWallet, address indexed newWallet);
     event GovernorContractSet(address indexed governor);
     event ValuationContractSet(address indexed valuation);

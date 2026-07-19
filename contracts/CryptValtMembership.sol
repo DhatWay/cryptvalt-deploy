@@ -220,7 +220,7 @@ contract CryptValtMembership is ERC721, ERC721Enumerable, ERC2981, Ownable2Step,
     ///         (price that into secondary sales).
     function claimRevenue() external nonReentrant {
         uint256 n = balanceOf(msg.sender);
-        uint256 owed;
+        uint256 owed = 0;
         for (uint256 i; i < n; ++i) {
             uint256 id = tokenOfOwnerByIndex(msg.sender, i);
             uint256 p  = pendingRevenueOf(id);

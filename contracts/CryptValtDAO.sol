@@ -104,7 +104,7 @@ contract CryptValtDAO is Ownable2Step, Pausable, ReentrancyGuard {
 
     ICVTToken   public cvtToken;
     IFounderNFT public founderNFT;
-    address     public treasury;
+    address     public immutable treasury;
 
     uint256 public proposalCount;
     uint256 public totalVotesCast;
