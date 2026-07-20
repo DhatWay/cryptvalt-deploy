@@ -7,7 +7,7 @@ module.exports = {
   solidity: {
     version: "0.8.28",
     settings: {
-      optimizer: { enabled: true, runs: 200 },
+      optimizer: { enabled: true, runs: 1 },
       evmVersion: "cancun",
       viaIR: true,
     },
@@ -15,8 +15,9 @@ module.exports = {
   networks: {
     hardhat: {},
     sepolia: {
-      url: process.env.SEPOLIA_RPC_URL || "https://rpc.sepolia.org",
+      url: process.env.SEPOLIA_RPC_URL || "https://ethereum-sepolia-rpc.publicnode.com",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      gasPrice: 1500000000,
     },
   },
 };
