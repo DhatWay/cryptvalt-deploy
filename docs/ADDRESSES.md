@@ -29,16 +29,17 @@ and the other location is stale.
 
 ## Deployed contracts (v2.0)
 
-_To be filled in at Sepolia deployment — one row per contract with
-address and deployment tx._
+Deployed July 2026 by `0x205B...8D5f` with the Safe as constructor admin
+of the core; two-step ownership transfers to the Safe initiated for the
+other seven.
 
 | Contract | Network | Address |
 |---|---|---|
-| CryptValt | Sepolia | _pending_ |
-| CryptValtToken | Sepolia | _pending_ |
-| CryptValtFounder | Sepolia | _pending_ |
-| CryptValtMembership | Sepolia | _pending_ |
-| CryptValtRevenue | Sepolia | _pending_ |
-| CryptValtGovernor | Sepolia | _pending_ |
-| CryptValtValuation | Sepolia | _pending_ |
-| CryptValtDAO | Sepolia | _pending_ |
+| CryptValt | Sepolia | `0xC47ea60026428Fe8DfDC23dE625fDaDFc47B35a4` |
+| CryptValtToken | Sepolia | `0xDd770632715dEeB7550f66D7d464831B24885d58` |
+| CryptValtFounder | Sepolia | `0xE42ad606468A09e06AB482992F8635A1B3Fd27b6` |
+| CryptValtMembership | Sepolia | `0x625D86d014db3C56dEDD609e1de8b445564E5614` |
+| CryptValtRevenue | Sepolia | `0x16EF394DF0021331EdB1e4ddAFfb9c67f4351830` |
+| CryptValtGovernor | Sepolia | `0xd5bd72e3724Ae39A18CfE72D8e5CE2A4Bd951B9d` |
+| CryptValtValuation | Sepolia | `0x7ecCA87785313F8CdD285F5c79235bB4e1268e78` |
+| CryptValtDAO | Sepolia | `0x4370a034D896882aFBA7c036A3154a70c0606638` |
