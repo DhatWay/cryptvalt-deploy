@@ -26,6 +26,11 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 ///      - Pull-payment pattern for ALL payouts (no push transfers)
 ///      - Timelocked fee & platform-wallet changes
 ///      - Custom errors, full event coverage, on-chain solvency invariant
+///      v2.1 additions:
+///      - reauction(): relist a dead auction as a NEW listing that
+///        inherits the payload, preserving old bid/refund records
+///      - archiveListing(): hide settled listings (status 8) with a
+///        guard that blocks archiving while funds are still owed
 
 interface IGovernor {
     function onListingCreated(uint256 id, address inventor) external;
@@ -111,6 +116,10 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     error TimelockActive();
     error NotInEmergency();
     error NotFrozenListing();
+    error NotReauctionable();
+    error AlreadyArchived();
+    error FundsStillOwed();
+    error CannotArchiveActive();
 
     /*////////////////////////////////////////////////////////////////
                                  STORAGE
@@ -118,6 +127,7 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
 
     /// @dev status: 0=Active 1=Revealing 2=AwaitingKey 3=KeyDelivered
     ///              4=Complete 5=Disputed 6=Cancelled/Refunded 7=Frozen
+    ///              8=Archived (settled, hidden from active views)
     struct Listing {
         address payable inventor;
         address  winner;
@@ -186,6 +196,13 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     mapping(address => uint256)                 public pendingWithdrawals;
     mapping(address => bool)                    public frozenWallets;
 
+    /// @notice For a relisted idea: the listing it was reauctioned from.
+    mapping(uint256 => uint256) public reauctionedFrom;
+    /// @notice For an original listing: its most recent relisting.
+    mapping(uint256 => uint256) public reauctionedTo;
+    /// @notice How many times an idea has been put back to auction.
+    mapping(uint256 => uint32)  public reauctionCount;
+
     /*////////////////////////////////////////////////////////////////
                                   EVENTS
     ////////////////////////////////////////////////////////////////*/
@@ -209,6 +226,8 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     event WalletUnfrozen(address indexed wallet);
     event ListingFrozen(uint256 indexed id);
     event ListingUnfrozen(uint256 indexed id);
+    event Reauctioned(uint256 indexed oldId, uint256 indexed newId, address indexed inventor, uint256 reserve, uint256 endTime);
+    event Archived(uint256 indexed id, address indexed by);
     event EmergencyActivated(address indexed by);
     event EmergencyDeactivated(address indexed by);
     event EmergencyDrainQueued(uint256 executableAt);
@@ -615,6 +634,122 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
         if (listings[id].status != 7) revert NotFrozenListing();
         listings[id].status = 0;
         emit ListingUnfrozen(id);
+    }
+
+    /*////////////////////////////////////////////////////////////////
+                        REAUCTION  &  ARCHIVE
+    ////////////////////////////////////////////////////////////////*/
+
+    /// @notice Put a finished-but-unsold idea back up for auction.
+    /// @dev Admin-triggered (inventors submit requests off-chain, an
+    ///      admin approves and calls this). Creates a NEW listing that
+    ///      inherits the original's CID, key hash, category and
+    ///      inventor, rather than resetting the old one — the old
+    ///      auction's bid records stay intact so past bidders can
+    ///      always still claim refunds.
+    /// @param oldId       Listing being relisted. Must be Cancelled (6)
+    ///                    or Archived (8) — never an in-flight or
+    ///                    successfully completed auction.
+    /// @param reserve     New reserve price in wei.
+    /// @param duration    New auction length (1–7 days).
+    /// @param royaltyBps  New secondary royalty (max 10%).
+    /// @return newId      The newly created listing id.
+    function reauction(
+        uint256 oldId,
+        uint256 reserve,
+        uint256 duration,
+        uint256 royaltyBps
+    ) external onlyRole(GOVERNOR_ROLE) whenNotPaused exists(oldId) returns (uint256 newId) {
+        Listing storage o = listings[oldId];
+
+        // Only dead auctions may be relisted: cancelled/refunded (6) or
+        // archived (8). A completed sale (4) belongs to its buyer.
+        if (o.status != 6 && o.status != 8) revert NotReauctionable();
+        if (reserve == 0)                   revert NoReserve();
+        if (duration < MIN_DUR || duration > MAX_DUR) revert BadDuration();
+        if (royaltyBps > MAX_ROYALTY)       revert HighRoyalty();
+        if (frozenWallets[o.inventor])      revert WalletIsFrozen();
+
+        newId = ++listingCount;
+        uint64 end = uint64(block.timestamp + duration);
+
+        Listing storage n = listings[newId];
+        n.inventor       = o.inventor;
+        n.reservePrice   = uint128(reserve);
+        n.endTime        = end;
+        n.revealDeadline = end + uint64(REVEAL_WIN);
+        n.keyDeadline    = end + uint64(REVEAL_WIN + KEY_WIN);
+        n.royaltyBps     = uint16(royaltyBps);
+
+        // Carry the encrypted payload references across.
+        listingCID[newId]      = listingCID[oldId];
+        listingKeyHash[newId]  = listingKeyHash[oldId];
+        listingCategory[newId] = listingCategory[oldId];
+
+        // Provenance links, so the full history of an idea is readable.
+        reauctionedFrom[newId] = oldId;
+        reauctionedTo[oldId]   = newId;
+        reauctionCount[newId]  = reauctionCount[oldId] + 1;
+
+        inventorListings[o.inventor].push(newId);
+        totalListings++;
+
+        if (governorContract != address(0)) {
+            IGovernor(governorContract).onListingCreated(newId, o.inventor);
+        }
+        emit Reauctioned(oldId, newId, o.inventor, reserve, end);
+        emit Listed(newId, o.inventor, reserve, end);
+    }
+
+    /// @notice Archive a finished listing so it no longer appears in
+    ///         active views and can take no further interaction.
+    /// @dev On-chain data is permanent — this is a status change, not
+    ///      erasure, and the record stays publicly readable forever.
+    ///      Blocked while anything is still owed on the listing, so an
+    ///      archive can never hide an unsettled obligation.
+    ///      Status 8 = Archived.
+    function archiveListing(uint256 id) external onlyRole(GOVERNOR_ROLE) exists(id) {
+        Listing storage l = listings[id];
+
+        if (l.status == 8) revert AlreadyArchived();
+
+        // Only settled outcomes may be archived: Complete (4) or
+        // Cancelled/Refunded (6).
+        if (l.status != 4 && l.status != 6) revert CannotArchiveActive();
+
+        // A completed sale must have actually paid out.
+        if (l.status == 4 && !l.fundsReleased) revert FundsStillOwed();
+
+        // Any bidder deposit still unclaimed blocks the archive.
+        address[] storage bs = bidders[id];
+        uint256 n = bs.length;
+        for (uint256 i; i < n; ++i) {
+            Bid storage b = bids[id][bs[i]];
+            if (b.commitment != bytes32(0) && !b.refunded && !b.isWinner) {
+                revert FundsStillOwed();
+            }
+        }
+
+        l.status = 8;
+        emit Archived(id, msg.sender);
+    }
+
+    /// @notice Full relisting chain for an idea, oldest first.
+    function getReauctionHistory(uint256 id) external view returns (uint256[] memory chain) {
+        // Walk back to the original.
+        uint256 root = id;
+        while (reauctionedFrom[root] != 0) root = reauctionedFrom[root];
+        // Count forward.
+        uint256 len = 1;
+        uint256 cur = root;
+        while (reauctionedTo[cur] != 0) { cur = reauctionedTo[cur]; len++; }
+        // Fill.
+        chain = new uint256[](len);
+        cur = root;
+        for (uint256 i; i < len; ++i) {
+            chain[i] = cur;
+            cur = reauctionedTo[cur];
+        }
     }
 
     function pause() external onlyRole(PAUSER_ROLE) { _pause(); }
