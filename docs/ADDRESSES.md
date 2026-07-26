@@ -14,6 +14,8 @@ and the other location is stale.
 
 ## Retired / do not use
 
+| `0xC47ea60026428Fe6DfDC23dE625fDaDFc47B35a4` | Original v2.0 CryptValt core — replaced by the v2.1 redeploy (reauction + archive). Do not use. |
+
 | Address | Status |
 |---|---|
 | `0x640B8140cD4FB3CDA81c91D5C733C40d5509Cd56` | Former wallet once labeled as the Safe in site code; not multisig-capable. Removed from all code July 2026. If found anywhere, replace with the Safe address above. |
@@ -35,7 +37,7 @@ other seven.
 
 | Contract | Network | Address |
 |---|---|---|
-| CryptValt | Sepolia | `0xC47ea60026428Fe8DfDC23dE625fDaDFc47B35a4` |
+| CryptValt | Sepolia | `0xb901af1956bfBB3CD40b41106DB6684412CD0846` |
 | CryptValtToken | Sepolia | `0xDd770632715dEeB7550f66D7d464831B24885d58` |
 | CryptValtFounder | Sepolia | `0xE42ad606468A09e06AB482992F8635A1B3Fd27b6` |
 | CryptValtMembership | Sepolia | `0x625D86d014db3C56dEDD609e1de8b445564E5614` |
