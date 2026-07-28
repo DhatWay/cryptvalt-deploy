@@ -70,8 +70,3 @@ can perform any privileged action.
   emergency path, change fees outside the 10–30% hard bounds, mint
   extra CVT (fixed supply), or bypass the bid/settlement logic.
 
-## Reporting a vulnerability
-
-See BOUNTY.md for scope and rewards. Report privately to the team
-before public disclosure; we commit to acknowledging reports within
-72 hours.
