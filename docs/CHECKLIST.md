@@ -65,5 +65,4 @@ tested · 📋 documented limitation · ⬜ planned.
 ## G11 — Transparency
 - ✅ Full bug history published (BUGS.md), including a bug caught in our own v2 fix by the test suite
 - ✅ Known limitations documented in-contract (NatSpec) and in docs
-- ✅ Bounty scope published (BOUNTY.md)
 - ⬜ Deployed bytecode verification on Etherscan/Sourcify at deployment
