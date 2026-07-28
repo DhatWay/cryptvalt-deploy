@@ -12,6 +12,15 @@ module.exports = {
       viaIR: true,
     },
   },
+  // Source verification. Sepolia + mainnet both resolve through the
+  // unified Etherscan v2 API, so one key covers both.
+  etherscan: {
+    apiKey: {
+      sepolia: process.env.ETHERSCAN_API_KEY || "",
+      mainnet: process.env.ETHERSCAN_API_KEY || "",
+    },
+  },
+  sourcify: { enabled: false },
   networks: {
     hardhat: {},
     sepolia: {
