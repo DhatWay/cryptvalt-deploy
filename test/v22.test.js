@@ -337,10 +337,13 @@ describe("CryptValt v2.2 — mainnet hardening", function () {
       const Founder = await ethers.getContractFactory("CryptValtFounder");
       const DAO     = await ethers.getContractFactory("CryptValtDAO");
 
-      token   = await Token.deploy(admin.address);
-      founder = await Founder.deploy(admin.address);
+      token   = await Token.deploy(admin.address, treasury.address);
+      founder = await Founder.deploy(admin.address, treasury.address);
       dao     = await DAO.deploy(
-        await token.getAddress(), await founder.getAddress(), admin.address
+        admin.address,
+        await token.getAddress(),
+        await founder.getAddress(),
+        treasury.address
       );
     });
 
@@ -349,16 +352,30 @@ describe("CryptValt v2.2 — mainnet hardening", function () {
     });
 
     it("refuses a veto from a holder of one NFT", async function () {
-      const price = await founder.MINT_PRICE().catch(() => 0n);
-      await founder.connect(admin).setMintOpen?.(true).catch(() => {});
-      await founder.connect(other).mint({ value: price }).catch(() => {});
+      await founder.connect(admin).adminMint(other.address);
+      expect(await founder.balanceOf(other.address)).to.equal(1n);
 
-      const held = await founder.balanceOf(other.address);
-      if (held === 0n) this.skip();          // mint gated differently
-      expect(held).to.be.lessThan(await dao.VETO_THRESHOLD());
+      await token.connect(admin).transfer(bidder1.address, ethers.parseEther("6000000"));
+      await dao.connect(bidder1).propose("T", "D", 0, ethers.ZeroAddress, "0x");
 
+      // One NFT used to be enough to block any proposal, permanently,
+      // for the price of a single public mint.
       await expect(dao.connect(other).veto(1))
         .to.be.revertedWithCustomError(dao, "NotFounder");
+    });
+
+    it("allows a veto once the threshold is met", async function () {
+      const threshold = await dao.VETO_THRESHOLD();
+      for (let i = 0; i < Number(threshold); i++) {
+        await founder.connect(admin).adminMint(other.address);
+      }
+      expect(await founder.balanceOf(other.address)).to.equal(threshold);
+
+      await token.connect(admin).transfer(bidder1.address, ethers.parseEther("6000000"));
+      await dao.connect(bidder1).propose("T", "D", 0, ethers.ZeroAddress, "0x");
+
+      await dao.connect(other).veto(1);
+      expect(await dao.getState(1)).to.equal(6);
     });
   });
 });
