@@ -234,8 +234,12 @@ describe("CryptValt v2.0", function () {
       expect((await cryptvalt.getListing(id)).status).to.equal(6);
       await cryptvalt.connect(bidder1).claimBidRefund(id);
       await cryptvalt.connect(bidder2).claimBidRefund(id);
-      expect(await cryptvalt.pendingWithdrawals(bidder1.address)).to.equal(ethers.parseEther("2.5"));
-      expect(await cryptvalt.pendingWithdrawals(bidder2.address)).to.equal(ethers.parseEther("3"));
+      // v2.2: neither bidder revealed, so each forfeits
+      // NO_REVEAL_FORFEIT_BPS (5%) of their deposit. Abandoning a
+      // commitment used to be free, which made a sealed bid an option
+      // on the asset rather than a bid.
+      expect(await cryptvalt.pendingWithdrawals(bidder1.address)).to.equal(ethers.parseEther("2.375"));
+      expect(await cryptvalt.pendingWithdrawals(bidder2.address)).to.equal(ethers.parseEther("2.85"));
     });
   });
 
@@ -504,8 +508,10 @@ describe("CryptValt v2.0", function () {
     });
 
     it("Founder holders can veto", async function () {
-      await founder.connect(admin).setMintOpen(true);
-      await founder.connect(bidder2).mint({ value: ethers.parseEther("1") });
+      // v2.2: a veto takes VETO_THRESHOLD founder NFTs, not one.
+      // Public minting meant one purchase could block governance
+      // permanently.
+      for (let i = 0; i < 3; i++) await founder.connect(admin).adminMint(bidder2.address);
       await token.connect(admin).transfer(bidder1.address, ethers.parseEther("6000000"));
       await dao.connect(bidder1).propose("T", "D", 0, ethers.ZeroAddress, "0x");
       await dao.connect(bidder2).veto(1);
