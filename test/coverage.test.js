@@ -813,8 +813,8 @@ describe("CryptValt v2.0 — extended coverage", function () {
 
       // veto rejections
       await expect(dao.connect(other).veto(2)).to.be.revertedWithCustomError(dao, "NotFounder");
-      await founder.connect(admin).setMintOpen(true);
-      await founder.connect(bidder2).mint({ value: ethers.parseEther("1") });
+      // v2.2: one NFT is no longer enough to veto.
+      for (let i = 0; i < 3; i++) await founder.connect(admin).adminMint(bidder2.address);
       await expect(dao.connect(bidder2).veto(3)).to.be.revertedWithCustomError(dao, "Finalized");
 
       // executor whitelist + setters + pause
