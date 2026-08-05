@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 /*//////////////////////////////////////////////////////////////////////////
-                                CRYPTVALT v2.0
+                                CRYPTVALT v2.2
             Sealed-Bid Idea Auction Escrow — OpenZeppelin Edition
 //////////////////////////////////////////////////////////////////////////*/
 
@@ -26,6 +26,19 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 ///      - Pull-payment pattern for ALL payouts (no push transfers)
 ///      - Timelocked fee & platform-wallet changes
 ///      - Custom errors, full event coverage, on-chain solvency invariant
+///      v2.2 additions (mainnet hardening):
+///        - Pausing no longer causes a deadline default. Reveal and key
+///          windows are extended by however long the platform was
+///          paused, so an operator action cannot resolve an auction
+///          against a participant who did nothing wrong.
+///        - Failing to reveal now forfeits a portion of the deposit.
+///          A full refund made a sealed bid a free option: commit,
+///          watch the reveals, walk away if the price no longer suits.
+///        - Bids require a deposit above the amount bid. Deposits are
+///          public and must cover the bid, so depositing exactly what
+///          you intend to bid publishes your maximum to anyone
+///          watching the chain.
+///
 ///      v2.1 additions:
 ///      - reauction(): relist a dead auction as a NEW listing that
 ///        inherits the payload, preserving old bid/refund records
@@ -62,6 +75,27 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     uint256 public constant KEY_WIN         = 48 hours;
     uint256 public constant MAX_BIDDERS     = 500;
     uint256 public constant ADMIN_TIMELOCK  = 24 hours;
+
+    /// @dev Forfeited by a bidder who commits and never reveals, in bps
+    ///      of their deposit. A sealed-bid auction only works if a
+    ///      commitment costs something to abandon; at zero, bidders can
+    ///      watch the reveals and withdraw for free, which is an option
+    ///      on the asset rather than a bid. 5% is enough to deter that
+    ///      without punishing someone who genuinely lost access.
+    uint256 public constant NO_REVEAL_FORFEIT_BPS = 500;   // 5%
+
+    /// @dev Minimum margin a deposit must carry over the bid it hides,
+    ///      in bps. Deposits are visible on-chain; if a deposit equals
+    ///      the bid, the bid is public in all but name. Requiring a
+    ///      margin means a deposit sets an upper bound rather than
+    ///      revealing an exact figure. Surplus is refunded in full at
+    ///      settlement, so this costs an honest bidder nothing but the
+    ///      temporary lock-up.
+    uint256 public constant MIN_DEPOSIT_MARGIN_BPS = 1_000; // 10%
+
+    /// @dev Ceiling on cumulative pause extension per listing. Without
+    ///      it, repeated pauses could hold an auction open indefinitely.
+    uint256 public constant MAX_PAUSE_EXTENSION = 14 days;
     uint256 public constant EMERGENCY_DELAY = 48 hours;
 
     bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
@@ -120,6 +154,7 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     error AlreadyArchived();
     error FundsStillOwed();
     error CannotArchiveActive();
+    error DepositMarginTooLow();
 
     /*////////////////////////////////////////////////////////////////
                                  STORAGE
@@ -180,6 +215,17 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     ///         (active bid deposits + queued withdrawals).
     uint256 public totalEscrowed;
 
+    /// @dev Wall-clock moment the platform was last paused, and the
+    ///      running total of paused time. Deadlines are compared against
+    ///      pausedOffset so that time spent paused does not count
+    ///      against anyone's window.
+    uint256 public pauseStartedAt;
+    uint256 public pausedOffset;
+
+    /// @dev Deposit forfeited by non-revealers, credited to the platform
+    ///      only once the auction has fully settled.
+    mapping(uint256 => uint256) public forfeitedDeposits;
+
     PendingAdminChange public pendingFeeChange;
     PendingAdminChange public pendingWalletChange;
 
@@ -227,6 +273,8 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     event ListingFrozen(uint256 indexed id);
     event ListingUnfrozen(uint256 indexed id);
     event Reauctioned(uint256 indexed oldId, uint256 indexed newId, address indexed inventor, uint256 reserve, uint256 endTime);
+    event DeadlinesExtended(uint256 pausedSeconds, uint256 totalOffset);
+    event DepositForfeited(uint256 indexed id, address indexed bidder, uint256 amount);
     event Archived(uint256 indexed id, address indexed by);
     event EmergencyActivated(address indexed by);
     event EmergencyDeactivated(address indexed by);
@@ -351,6 +399,15 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
         if (msg.sender == l.inventor)      revert InventorCannotBid();
         if (l.bidCount >= MAX_BIDDERS)     revert AuctionFull();
         if (msg.value < l.reservePrice)    revert DepositBelowReserve();
+        // Deposits are public; bids are not. A deposit that exactly
+        // covers the intended bid publishes that bid to anyone reading
+        // the chain, and a late bidder can simply clear the highest
+        // deposit on the book. Requiring headroom over the reserve
+        // means a deposit bounds a bid rather than revealing it.
+        // Surplus returns in full at settlement.
+        if (msg.value < l.reservePrice + (uint256(l.reservePrice) * MIN_DEPOSIT_MARGIN_BPS) / BPS) {
+            revert DepositMarginTooLow();
+        }
         if (bids[id][msg.sender].commitment != bytes32(0)) revert BidExists();
 
         if (governorContract != address(0)) {
@@ -387,12 +444,18 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
         external whenNotPaused exists(id)
     {
         Listing storage l = listings[id];
-        if (block.timestamp < l.endTime || block.timestamp > l.revealDeadline) revert WrongWindow();
+        if (block.timestamp < l.endTime || block.timestamp > effectiveDeadline(l.revealDeadline)) revert WrongWindow();
         Bid storage b = bids[id][msg.sender];
         if (b.commitment == bytes32(0) || b.revealed) revert InvalidBid();
         if (amount < l.reservePrice) revert AmountBelowReserve();
         if (keccak256(abi.encodePacked(amount, salt, msg.sender, id)) != b.commitment) revert BadReveal();
         if (b.depositAmount < amount) revert DepositTooLow();
+        // Same reasoning as commitBid: if a revealed bid may consume the
+        // entire deposit, then the deposit was the bid all along and the
+        // margin bought nothing.
+        if (b.depositAmount < amount + (amount * MIN_DEPOSIT_MARGIN_BPS) / BPS) {
+            revert DepositMarginTooLow();
+        }
 
         b.revealed       = true;
         b.revealedAmount = amount;
@@ -412,7 +475,7 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     function settleAuction(uint256 id) external exists(id) nonReentrant {
         Listing storage l = listings[id];
         if (l.status > 1)                        revert CannotSettle();
-        if (block.timestamp <= l.revealDeadline) revert RevealStillOpen();
+        if (block.timestamp <= effectiveDeadline(l.revealDeadline)) revert RevealStillOpen();
 
         address winner = l.winner;
         uint256 winBid = l.winningBid;
@@ -447,14 +510,42 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     ///         cancellation (losing bidders and non-revealers).
     /// @dev Pull-pattern replacement for v1's refund loops — removes the
     ///      unbounded-gas settlement risk entirely.
+    /**
+     * @notice Reclaim a deposit after an auction has resolved.
+     * @dev A bidder who REVEALED gets everything back — they played the
+     *      auction as intended and simply did not win.
+     *
+     *      A bidder who committed and never revealed forfeits
+     *      NO_REVEAL_FORFEIT_BPS of their deposit. Reveals are sequential
+     *      and public: with a costless exit, the rational move is to
+     *      commit, watch the others reveal, and walk away if the price
+     *      no longer suits. That is an option on the asset, not a bid,
+     *      and it degrades every honest bidder's position. A small
+     *      forfeit makes abandonment a decision rather than a freebie.
+     *
+     *      The forfeit accrues to the platform, not the inventor —
+     *      paying the seller would give them a reason to want bids to
+     *      fail.
+     */
     function claimBidRefund(uint256 id) external exists(id) nonReentrant {
         Listing storage l = listings[id];
         if (l.status < 2) revert CannotSettle();
         Bid storage b = bids[id][msg.sender];
         if (b.commitment == bytes32(0) || b.refunded || b.isWinner) revert NothingToClaim();
 
-        b.refunded = true;
+        b.refunded  = true;
         uint256 amt = b.depositAmount;
+
+        if (!b.revealed) {
+            uint256 forfeit = (amt * NO_REVEAL_FORFEIT_BPS) / BPS;
+            if (forfeit > 0) {
+                amt -= forfeit;
+                forfeitedDeposits[id]          += forfeit;
+                pendingWithdrawals[platformWallet] += forfeit;
+                emit DepositForfeited(id, msg.sender, forfeit);
+            }
+        }
+
         pendingWithdrawals[msg.sender] += amt;
         emit BidRefundClaimed(id, msg.sender, amt);
     }
@@ -472,7 +563,7 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
         if (msg.sender != l.inventor)        revert NotInventor();
         if (l.status != 2)                   revert NotAwaitingKey();
         if (bytes(encKey).length == 0)       revert EmptyKey();
-        if (block.timestamp > l.keyDeadline) revert PastDeadline();
+        if (block.timestamp > effectiveDeadline(l.keyDeadline)) revert PastDeadline();
 
         _listingEncryptedKey[id] = encKey;
         l.keyDelivered = true;
@@ -509,7 +600,7 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     function claimRefund(uint256 id) external exists(id) nonReentrant {
         Listing storage l = listings[id];
         if (msg.sender != l.winner || l.status != 2) revert NotWinner();
-        if (block.timestamp <= l.keyDeadline)        revert DeadlineNotPassed();
+        if (block.timestamp <= effectiveDeadline(l.keyDeadline)) revert DeadlineNotPassed();
         l.status = 6;
         pendingWithdrawals[msg.sender] += l.winningBid;
         emit RefundQueued(msg.sender, l.winningBid);
@@ -752,18 +843,64 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
         }
     }
 
-    function pause() external onlyRole(PAUSER_ROLE) { _pause(); }
+    /**
+     * @notice Halt new activity.
+     * @dev Records when the pause began so the time can be given back.
+     *      Withdrawals and refunds are deliberately NOT pausable —
+     *      participants must always be able to get their money out.
+     */
+    function pause() external onlyRole(PAUSER_ROLE) {
+        pauseStartedAt = block.timestamp;
+        _pause();
+    }
 
-    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) { _unpause(); }
+    /**
+     * @notice Resume, and give back the time.
+     * @dev Reveal and key windows are checked against `pausedOffset`,
+     *      so a pause during someone's window extends it rather than
+     *      running it down. Without this, pausing for maintenance
+     *      during a 48-hour delivery window could void a sale and
+     *      refund a buyer against an inventor who did nothing wrong —
+     *      an outcome the contract enforces automatically and nobody
+     *      can reverse.
+     *
+     *      Capped: repeated pauses cannot hold auctions open forever.
+     */
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (pauseStartedAt != 0) {
+            uint256 elapsed = block.timestamp - pauseStartedAt;
+            uint256 next    = pausedOffset + elapsed;
+            pausedOffset    = next > MAX_PAUSE_EXTENSION ? MAX_PAUSE_EXTENSION : next;
+            pauseStartedAt  = 0;
+            emit DeadlinesExtended(elapsed, pausedOffset);
+        }
+        _unpause();
+    }
+
+    /**
+     * @notice A deadline adjusted for platform downtime.
+     * @dev Every deadline comparison in the contract goes through this.
+     */
+    function effectiveDeadline(uint256 rawDeadline) public view returns (uint256) {
+        return rawDeadline + pausedOffset;
+    }
 
     function activateEmergency() external onlyRole(DEFAULT_ADMIN_ROLE) {
         emergencyMode = true;
+        pauseStartedAt = block.timestamp;
         _pause();
         emit EmergencyActivated(msg.sender);
     }
 
     function deactivateEmergency() external onlyRole(DEFAULT_ADMIN_ROLE) {
         emergencyMode = false;
+        if (pauseStartedAt != 0) {
+            uint256 elapsed = block.timestamp - pauseStartedAt;
+            uint256 next    = pausedOffset + elapsed;
+            pausedOffset    = next > MAX_PAUSE_EXTENSION ? MAX_PAUSE_EXTENSION : next;
+            pauseStartedAt  = 0;
+            emit DeadlinesExtended(elapsed, pausedOffset);
+        }
         _unpause();
         emit EmergencyDeactivated(msg.sender);
     }
