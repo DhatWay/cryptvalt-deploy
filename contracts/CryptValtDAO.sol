@@ -53,6 +53,8 @@ contract CryptValtDAO is Ownable2Step, Pausable, ReentrancyGuard {
     uint256 public constant QUORUM_BPS         = 500;   // 5%
     uint256 public constant PASS_BPS           = 6_000; // 60% of for+against
     uint256 public constant BPS                = 10_000;
+    /// @dev Founder NFTs required to veto a proposal. See veto().
+    uint256 public constant VETO_THRESHOLD     = 3;
 
     /*////////////////////////////////////////////////////////////////
                               CUSTOM ERRORS
@@ -260,9 +262,25 @@ contract CryptValtDAO is Ownable2Step, Pausable, ReentrancyGuard {
         emit ProposalExecuted(id);
     }
 
-    /// @notice Founder NFT holders can veto any non-finalized proposal.
+    /**
+     * @notice Veto a non-finalized proposal.
+     *
+     * @dev Requires VETO_THRESHOLD founder NFTs, not one.
+     *
+     *      A single-token check made governance capturable for the
+     *      price of one mint: mint() on the founder contract is public
+     *      and payable, so anyone could buy one NFT and block every
+     *      proposal, permanently, with no way to remove them. A veto is
+     *      meant to be a founder safeguard against a hostile proposal,
+     *      not a lever a passer-by can hold.
+     *
+     *      A threshold does not make capture impossible — someone can
+     *      buy more tokens — but it prices it at a level where the
+     *      holder has a real stake in the platform they would be
+     *      breaking.
+     */
     function veto(uint256 id) external {
-        if (founderNFT.balanceOf(msg.sender) == 0) revert NotFounder();
+        if (founderNFT.balanceOf(msg.sender) < VETO_THRESHOLD) revert NotFounder();
         Proposal storage p = proposals[id];
         if (p.executed || p.vetoed || p.cancelled) revert Finalized();
         uint8 s = getState(id);
