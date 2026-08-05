@@ -34,10 +34,15 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 ///        - Failing to reveal now forfeits a portion of the deposit.
 ///          A full refund made a sealed bid a free option: commit,
 ///          watch the reveals, walk away if the price no longer suits.
-///        - Bids require a deposit above the amount bid. Deposits are
-///          public and must cover the bid, so depositing exactly what
-///          you intend to bid publishes your maximum to anyone
-///          watching the chain.
+///      NOT changed, deliberately: deposits are public and must cover
+///      the bid, so a bidder who deposits exactly what they intend to
+///      bid publishes their maximum to anyone reading the chain. A
+///      forced margin was considered and rejected — it only narrows
+///      the leak (an observer still learns bid <= deposit/margin)
+///      while locking up extra funds for every honest bidder. The
+///      effective mitigation is to over-deposit by an arbitrary
+///      amount, which hides more and costs nothing. Surplus is
+///      refunded in full at settlement; the UI should say so.
 ///
 ///      v2.1 additions:
 ///      - reauction(): relist a dead auction as a NEW listing that
@@ -83,15 +88,6 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     ///      on the asset rather than a bid. 5% is enough to deter that
     ///      without punishing someone who genuinely lost access.
     uint256 public constant NO_REVEAL_FORFEIT_BPS = 500;   // 5%
-
-    /// @dev Minimum margin a deposit must carry over the bid it hides,
-    ///      in bps. Deposits are visible on-chain; if a deposit equals
-    ///      the bid, the bid is public in all but name. Requiring a
-    ///      margin means a deposit sets an upper bound rather than
-    ///      revealing an exact figure. Surplus is refunded in full at
-    ///      settlement, so this costs an honest bidder nothing but the
-    ///      temporary lock-up.
-    uint256 public constant MIN_DEPOSIT_MARGIN_BPS = 1_000; // 10%
 
     /// @dev Ceiling on cumulative pause extension per listing. Without
     ///      it, repeated pauses could hold an auction open indefinitely.
@@ -154,7 +150,6 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
     error AlreadyArchived();
     error FundsStillOwed();
     error CannotArchiveActive();
-    error DepositMarginTooLow();
 
     /*////////////////////////////////////////////////////////////////
                                  STORAGE
@@ -399,15 +394,6 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
         if (msg.sender == l.inventor)      revert InventorCannotBid();
         if (l.bidCount >= MAX_BIDDERS)     revert AuctionFull();
         if (msg.value < l.reservePrice)    revert DepositBelowReserve();
-        // Deposits are public; bids are not. A deposit that exactly
-        // covers the intended bid publishes that bid to anyone reading
-        // the chain, and a late bidder can simply clear the highest
-        // deposit on the book. Requiring headroom over the reserve
-        // means a deposit bounds a bid rather than revealing it.
-        // Surplus returns in full at settlement.
-        if (msg.value < l.reservePrice + (uint256(l.reservePrice) * MIN_DEPOSIT_MARGIN_BPS) / BPS) {
-            revert DepositMarginTooLow();
-        }
         if (bids[id][msg.sender].commitment != bytes32(0)) revert BidExists();
 
         if (governorContract != address(0)) {
@@ -450,12 +436,6 @@ contract CryptValt is AccessControlDefaultAdminRules, ReentrancyGuard, Pausable 
         if (amount < l.reservePrice) revert AmountBelowReserve();
         if (keccak256(abi.encodePacked(amount, salt, msg.sender, id)) != b.commitment) revert BadReveal();
         if (b.depositAmount < amount) revert DepositTooLow();
-        // Same reasoning as commitBid: if a revealed bid may consume the
-        // entire deposit, then the deposit was the bid all along and the
-        // margin bought nothing.
-        if (b.depositAmount < amount + (amount * MIN_DEPOSIT_MARGIN_BPS) / BPS) {
-            revert DepositMarginTooLow();
-        }
 
         b.revealed       = true;
         b.revealedAmount = amount;
