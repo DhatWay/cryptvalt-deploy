@@ -8,8 +8,9 @@
  *     windows are extended by however long the platform was paused.
  *  2. Failing to reveal forfeits part of the deposit, so a sealed bid
  *     is not a free option on the asset.
- *  3. Deposits must carry a margin over the bid they hide, so a public
- *     deposit bounds a bid instead of publishing it.
+ *  3. Over-depositing to hide a bid stays free — surplus is refunded
+ *     in full. (A forced margin was rejected: it narrows the leak
+ *     rather than closing it, at the cost of locking up honest funds.)
  *  4. Vetoing DAO governance takes VETO_THRESHOLD founder NFTs, not
  *     one — minting is public and payable.
  */
@@ -49,10 +50,10 @@ describe("CryptValt v2.2 — mainnet hardening", function () {
     return Number(await cryptvalt.listingCount());
   }
 
-  /** A deposit that satisfies the margin rule for a given bid. */
+  /** Over-deposit by 20%, the way a bidder hiding their maximum would. */
   function depositFor(bidEth) {
     const bid = ethers.parseEther(bidEth);
-    return bid + (bid * 2000n) / 10000n;   // 20% over — margin needs 10%
+    return bid + (bid * 2000n) / 10000n;
   }
 
   /* ================================================================
@@ -264,53 +265,17 @@ describe("CryptValt v2.2 — mainnet hardening", function () {
   });
 
   /* ================================================================
-     3. A DEPOSIT MUST NOT PUBLISH THE BID
+     3. OVER-DEPOSITING MUST COST NOTHING
+     ================================================================
+     A forced deposit margin was considered and rejected: it only
+     narrows the leak while locking up funds for honest bidders. The
+     mitigation is voluntary over-depositing, which only works if the
+     surplus comes back in full — so that is what is tested.
      ================================================================ */
 
-  describe("deposits bound a bid rather than revealing it", function () {
+  describe("over-depositing to hide a bid is free", function () {
 
-    it("rejects a deposit that only just meets the reserve", async function () {
-      const id = await list("1", 1);
-      const bid = ethers.parseEther("1");
-      await expect(
-        cryptvalt.connect(bidder1).commitBid(
-          id, commitment(bid, SALT, bidder1.address, id),
-          { value: ethers.parseEther("1") }
-        )
-      ).to.be.revertedWithCustomError(cryptvalt, "DepositMarginTooLow");
-    });
-
-    it("accepts a deposit carrying the required margin", async function () {
-      const id = await list("1", 1);
-      const bid = ethers.parseEther("1");
-      const margin = await cryptvalt.MIN_DEPOSIT_MARGIN_BPS();
-      const reserve = ethers.parseEther("1");
-      const min = reserve + (reserve * margin) / 10000n;
-
-      await expect(
-        cryptvalt.connect(bidder1).commitBid(
-          id, commitment(bid, SALT, bidder1.address, id), { value: min }
-        )
-      ).to.not.be.reverted;
-    });
-
-    it("rejects a reveal that would consume the whole deposit", async function () {
-      const id  = await list("1", 1);
-      const dep = ethers.parseEther("2");
-      // Bid equal to the deposit: if this were allowed, the public
-      // deposit would have been the bid all along.
-      const bid = dep;
-
-      await cryptvalt.connect(bidder1).commitBid(
-        id, commitment(bid, SALT, bidder1.address, id), { value: dep }
-      );
-      await time.increase(DAY + 60);
-      await expect(
-        cryptvalt.connect(bidder1).revealBid(id, bid, SALT)
-      ).to.be.revertedWithCustomError(cryptvalt, "DepositMarginTooLow");
-    });
-
-    it("refunds the surplus in full to the winner", async function () {
+    it("refunds the whole surplus to the winner", async function () {
       const id  = await list("1", 1);
       const bid = ethers.parseEther("2");
       const dep = ethers.parseEther("5");        // deliberately over-deposited
@@ -323,8 +288,40 @@ describe("CryptValt v2.2 — mainnet hardening", function () {
       await time.increase(24 * HOUR + 60);
       await cryptvalt.settleAuction(id);
 
-      // Over-depositing to hide a bid must cost nothing but the lock-up.
       expect(await cryptvalt.pendingWithdrawals(bidder1.address)).to.equal(dep - bid);
+    });
+
+    it("refunds the whole deposit to a loser who over-deposited and revealed", async function () {
+      const id   = await list("1", 1);
+      const low  = ethers.parseEther("1.5");
+      const high = ethers.parseEther("3");
+      const dep  = ethers.parseEther("4");       // far above the bid it hides
+
+      await cryptvalt.connect(bidder1).commitBid(
+        id, commitment(low, SALT, bidder1.address, id), { value: dep }
+      );
+      await cryptvalt.connect(bidder2).commitBid(
+        id, commitment(high, SALT, bidder2.address, id), { value: ethers.parseEther("4") }
+      );
+      await time.increase(DAY + 60);
+      await cryptvalt.connect(bidder1).revealBid(id, low, SALT);
+      await cryptvalt.connect(bidder2).revealBid(id, high, SALT);
+      await time.increase(24 * HOUR + 60);
+      await cryptvalt.settleAuction(id);
+
+      await cryptvalt.connect(bidder1).claimBidRefund(id);
+      expect(await cryptvalt.pendingWithdrawals(bidder1.address)).to.equal(dep);
+    });
+
+    it("still accepts a deposit equal to the reserve", async function () {
+      const id = await list("1", 1);
+      const bid = ethers.parseEther("1");
+      await expect(
+        cryptvalt.connect(bidder1).commitBid(
+          id, commitment(bid, SALT, bidder1.address, id),
+          { value: ethers.parseEther("1") }
+        )
+      ).to.not.be.reverted;
     });
   });
 
