@@ -114,8 +114,9 @@ describe("CryptValt v2.1 — reauction & archive", function () {
       // Old listing untouched, and bidder1 can still reclaim their deposit.
       expect((await cryptvalt.getListing(oldId)).status).to.equal(6);
       await cryptvalt.connect(bidder1).claimBidRefund(oldId);
+      // v2.2: bidder1 committed and never revealed, so 5% is forfeited.
       expect(await cryptvalt.pendingWithdrawals(bidder1.address))
-        .to.equal(ethers.parseEther("2"));
+        .to.equal(ethers.parseEther("1.9"));
       await cryptvalt.connect(bidder1).withdraw();
       expect(await cryptvalt.isSolvent()).to.equal(true);
     });
